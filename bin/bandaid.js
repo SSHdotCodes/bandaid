@@ -8,6 +8,7 @@ const config = require('../src/lib/config');
 const goals = require('../src/lib/goals');
 const install = require('../src/lib/install');
 const store = require('../src/lib/store');
+const verify = require('../src/lib/verify');
 const { buildRestoreBlock } = require('../src/lib/restore');
 const { COMPACTION_FIDELITY_ADDENDUM, SUMMARIZATION_PROMPT } = require('../src/lib/prompts');
 
@@ -64,9 +65,14 @@ Usage: bandaid <command> [options]
 
   goal show                  Print the active objective
   goal set <objective>       Set the objective explicitly
+      --check "<command>"    Close the goal automatically when this exits 0
+      --budget <tokens>      Stop continuing after roughly this many tokens
+  goal criteria [<c> ...]    Record the fixed acceptance criteria, or list them
+      --replace              Overwrite criteria that were already fixed
   goal complete [note]       Mark the objective achieved (this is what the model calls)
   goal blocked [note]        Mark the objective blocked
   goal clear                 Drop the objective entirely
+  verify                     Run the check command and the judge now, and report
 
   inspect [--session ID]     Summarize the ledger for a session
   preview [--session ID]     Print exactly what would be injected after a compaction
@@ -93,7 +99,8 @@ function cmdStatus(flags) {
   out(`bandaid ${pkg.version}`);
   out(`  enabled:        ${cfg.enabled ? 'yes' : 'no'}`);
   out(`  compaction:     ${cfg.compact.enabled ? 'on' : 'off'} (verbatim budget ${cfg.compact.userMessageMaxTokens} tokens, digests ${cfg.compact.digestBudgetTokens} tokens)`);
-  out(`  goals:          ${cfg.goals.enabled ? cfg.goals.mode : 'off'} (max ${cfg.goals.maxContinuations} continuation(s) per goal)`);
+  out(`  goals:          ${cfg.goals.enabled ? cfg.goals.mode : 'off'} (max ${goals.resolveMaxContinuations(cfg)} continuation(s) per goal, ${goals.verifierStrength(cfg)})`);
+  out(`  verification:   check ${cfg.goals.check ? `\`${cfg.goals.check}\`` : 'unset'}, judge ${cfg.goals.judge ? `on (${cfg.goals.judgeModel})` : 'off'}`);
   out(`  config file:    ${config.configPath()}`);
   out(`  state dir:      ${config.homeDir()}`);
   out(`  settings hooks: ${installed.length ? installed.join(', ') : 'none (plugin install, or not installed)'}`);
@@ -189,6 +196,12 @@ function cmdGoal(positional, flags) {
       out(`source:        ${goal.source}`);
       out(`continuations: ${goal.continuations}/${goal.maxContinuations ?? '∞'}`);
       out(`tokens used:   ~${goal.tokensUsed}${goal.tokenBudget ? ` / ${goal.tokenBudget}` : ''}`);
+      const effectiveCheck = goal.check ?? config.loadConfig().goals.check;
+      out(`check:         ${effectiveCheck || 'none'}`);
+      const criteria = goal.criteria || [];
+      out(`criteria:      ${criteria.length ? `${criteria.length} (${goal.criteriaSource || 'unknown'})` : 'none recorded'}`);
+      for (const [i, text] of criteria.entries()) out(`  ${i + 1}. ${text}`);
+      if (goal.lastReason) out(`last verdict:  ${goal.lastReason}${goal.plateau ? ` (repeated ${goal.plateau}x)` : ''}`);
       if (goal.note) out(`note:          ${goal.note}`);
       out('');
       out(goal.objective);
@@ -201,12 +214,45 @@ function cmdGoal(positional, flags) {
         return;
       }
       const cfg = config.loadConfig();
+      const check = typeof flags.check === 'string' ? flags.check : null;
       goals.setGoal(sessionId, objective, {
         source: 'explicit',
-        maxContinuations: flags['max-continuations'] ? Number(flags['max-continuations']) : (cfg.goals.maxContinuations ?? 2),
+        // Resolved with the check in hand, so `--check` earns the longer leash
+        // in the same breath that it supplies the thing doing the verifying.
+        maxContinuations: flags['max-continuations']
+          ? Number(flags['max-continuations'])
+          : goals.resolveMaxContinuations(cfg, { check }),
         tokenBudget: flags.budget ? Number(flags.budget) : null,
+        check,
       });
       out(`Goal set for session ${sessionId}.`);
+      if (typeof flags.check === 'string') {
+        out(`It closes automatically when \`${flags.check}\` exits 0.`);
+      }
+      return;
+    }
+    case 'criteria': {
+      const goal = goals.loadGoal(sessionId);
+      if (!goal) {
+        fail('no active goal to attach criteria to');
+        return;
+      }
+      if (!rest.length) {
+        const existing = goal.criteria || [];
+        if (!existing.length) out('No criteria recorded.');
+        for (const [i, text] of existing.entries()) out(`${i + 1}. ${text}`);
+        return;
+      }
+      const before = (goal.criteria || []).length;
+      const updated = goals.setCriteria(sessionId, rest, {
+        source: 'model',
+        replace: flags.replace === true || flags.replace === 'true',
+      });
+      if (before && !flags.replace) {
+        out(`Criteria already fixed for this goal (${before}); pass --replace to overwrite them.`);
+        return;
+      }
+      out(`Recorded ${updated.criteria.length} acceptance criteria. They are now the bar every turn.`);
       return;
     }
     case 'complete':
@@ -228,6 +274,51 @@ function cmdGoal(positional, flags) {
     default:
       fail(`unknown goal subcommand "${sub}"`);
   }
+}
+
+/**
+ * Run the verification tiers on demand. Without this a failing check is only
+ * ever seen by the model, which makes "why does it keep going?" unanswerable.
+ */
+function cmdVerify(flags) {
+  const sessionId = resolveSession(flags);
+  if (!sessionId) {
+    fail('no session found. Pass --session <id>.');
+    return;
+  }
+  const goal = goals.loadGoal(sessionId);
+  if (!goal) {
+    out('No active goal to verify.');
+    return;
+  }
+
+  const cfg = config.loadConfig();
+  const result = verify.assess({
+    goal,
+    config: cfg,
+    cwd: flags.cwd || process.cwd(),
+    turns: store.readTurns(sessionId),
+  });
+
+  if (flags.json) {
+    out(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  if (!result.verification) {
+    out('No verification configured for this goal.');
+    out('Add one with:  bandaid goal set "<objective>" --check "npm test"');
+    out(`Or turn the judge on in ${config.configPath()}:  {"goals":{"judge":true}}`);
+    return;
+  }
+
+  out(`${result.verification.source}: ${result.proven ? 'PASS' : 'FAIL'}`);
+  if (result.reason) out(result.reason);
+  if (result.verification.output) {
+    out('');
+    out(result.verification.output);
+  }
+  if (!result.proven) process.exitCode = 1;
 }
 
 function cmdInspect(flags) {
@@ -343,6 +434,8 @@ function main(argv) {
       return cmdToggle(false);
     case 'goal':
       return cmdGoal(positional, flags);
+    case 'verify':
+      return cmdVerify(flags);
     case 'inspect':
       return cmdInspect(flags);
     case 'preview':

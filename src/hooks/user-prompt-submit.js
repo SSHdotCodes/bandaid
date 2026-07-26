@@ -39,7 +39,7 @@ runHook('UserPromptSubmit', ({ input, config }) => {
   if (goalConfig.enabled !== false && goalConfig.mode === 'auto' && goals.isGoalWorthy(prompt)) {
     goals.setGoal(sessionId, prompt, {
       source: 'auto',
-      maxContinuations: goalConfig.maxContinuations ?? 2,
+      maxContinuations: goals.resolveMaxContinuations(config),
       tokenBudget: goalConfig.tokenBudget ?? null,
       turnIndex,
     });

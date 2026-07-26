@@ -36,6 +36,7 @@
   ],
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
+    "eval": "node eval/run.js",
     "doctor": "node bin/bandaid.js doctor"
   },
   "engines": {

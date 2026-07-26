@@ -45,7 +45,12 @@ const DEFAULTS = {
     // How many times a single objective may block a stop. Codex bounds
     // continuations by token budget; Bandaid bounds by count so a wedged
     // goal can never loop forever.
-    maxContinuations: 2,
+    //
+    // The cap tracks how strong the verifier is, because a goal closed by an
+    // exit status is bounded by that status and not by this number, while a
+    // goal nothing can check is bounded by nothing else at all. Set a plain
+    // number here to override all three tiers.
+    maxContinuations: { verified: 8, judged: 4, unverified: 2 },
 
     // Optional token budget per goal. null = unbounded.
     tokenBudget: null,
@@ -55,6 +60,24 @@ const DEFAULTS = {
 
     // Consecutive turns reporting the same blocker before "blocked" is allowed.
     blockedThreshold: 3,
+
+    // Shell command that proves the objective is done. Exit 0 closes the goal;
+    // any other status vetoes the stop no matter how finished the model feels.
+    // Set per goal with `bandaid goal set ... --check`, or globally here.
+    check: null,
+
+    // Ask a separate read-only Claude to verify against the worktree before a
+    // goal is allowed to close. Costs a subprocess and a few seconds per stop.
+    judge: false,
+    judgeModel: 'haiku',
+
+    // Ceiling for one check command or one judge run.
+    verifyTimeoutMs: 120000,
+
+    // Identical verification failures in a row before Bandaid stops asking.
+    // Guards the case neither Codex nor Claude Code detects: real-looking work
+    // every turn that never moves the failure.
+    plateauLimit: 2,
   },
 
   debug: false,
@@ -125,6 +148,10 @@ function envOverrides() {
   if (process.env.BANDAID_GOAL_MODE) goals.mode = process.env.BANDAID_GOAL_MODE;
   const maxCont = int('BANDAID_MAX_CONTINUATIONS');
   if (maxCont !== undefined) goals.maxContinuations = maxCont;
+  if (process.env.BANDAID_GOAL_CHECK) goals.check = process.env.BANDAID_GOAL_CHECK;
+  const judge = bool('BANDAID_JUDGE');
+  if (judge !== undefined) goals.judge = judge;
+  if (process.env.BANDAID_JUDGE_MODEL) goals.judgeModel = process.env.BANDAID_JUDGE_MODEL;
   if (Object.keys(goals).length) out.goals = goals;
 
   return out;

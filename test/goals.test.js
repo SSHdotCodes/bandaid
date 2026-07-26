@@ -4,7 +4,15 @@ const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 
 const { DEFAULTS } = require('../src/lib/config');
-const { decideOnStop, endsWithQuestionToUser, isGoalWorthy, newGoal, turnWasTrivial } = require('../src/lib/goals');
+const {
+  decideOnStop,
+  endsWithQuestionToUser,
+  isGoalWorthy,
+  newGoal,
+  resolveMaxContinuations,
+  turnWasTrivial,
+  verifierStrength,
+} = require('../src/lib/goals');
 
 const editBatch = [{ calls: [{ name: 'Edit', input: 'src/a.js', result: 'ok' }] }];
 const readBatch = [{ calls: [{ name: 'Read', input: 'src/a.js', result: 'contents' }] }];
@@ -126,5 +134,57 @@ describe('decideOnStop', () => {
   it('treats maxContinuations = 0 as disabled', () => {
     const goal = { ...newGoal('Ship it'), maxContinuations: 0 };
     assert.equal(decideOnStop({ ...base, goal }).action, 'allow');
+  });
+});
+
+describe('autonomy slider', () => {
+  const withGoals = (over) => ({ ...DEFAULTS, goals: { ...DEFAULTS.goals, ...over } });
+
+  it('keeps the leash short when nothing verifies the work', () => {
+    assert.equal(verifierStrength(DEFAULTS), 'unverified');
+    assert.equal(resolveMaxContinuations(DEFAULTS), 2);
+  });
+
+  it('lengthens it for a judge and further for a check', () => {
+    assert.equal(resolveMaxContinuations(withGoals({ judge: true })), 4);
+    assert.equal(resolveMaxContinuations(withGoals({ check: 'npm test' })), 8);
+  });
+
+  it('ranks a check above a judge when both are configured', () => {
+    const cfg = withGoals({ judge: true, check: 'npm test' });
+    assert.equal(verifierStrength(cfg), 'verified');
+    assert.equal(resolveMaxContinuations(cfg), 8);
+  });
+
+  it('lets a per-goal check earn the longer leash on its own', () => {
+    assert.equal(resolveMaxContinuations(DEFAULTS, { check: 'make verify' }), 8);
+  });
+
+  it('ignores a check that is only whitespace', () => {
+    assert.equal(resolveMaxContinuations(withGoals({ check: '   ' })), 2);
+  });
+
+  it('honours a scalar maxContinuations, which is what old configs look like', () => {
+    assert.equal(resolveMaxContinuations(withGoals({ maxContinuations: 5, check: 'npm test' })), 5);
+    assert.equal(resolveMaxContinuations(withGoals({ maxContinuations: 0 })), 0);
+  });
+
+  it('merges a partial tier override over the defaults', () => {
+    const cfg = withGoals({ maxContinuations: { verified: 20 }, check: 'npm test' });
+    assert.equal(resolveMaxContinuations(cfg), 20);
+    assert.equal(resolveMaxContinuations(withGoals({ maxContinuations: { verified: 20 } })), 2);
+  });
+
+  it('feeds decideOnStop when the goal carries no cap of its own', () => {
+    const goal = { ...newGoal('Ship it', { check: 'npm test' }), maxContinuations: null, continuations: 3 };
+    const decision = decideOnStop({
+      config: DEFAULTS,
+      goal,
+      stopHookActive: false,
+      recentBatches: editBatch,
+      lastAssistantMessage: 'Done.',
+    });
+    assert.equal(decision.action, 'continue', 'a checked goal should still have room at 3 continuations');
+    assert.match(decision.reason, /4\/8/);
   });
 });

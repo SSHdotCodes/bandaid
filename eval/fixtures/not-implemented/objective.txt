@@ -1,0 +1,1 @@
+Replace the legacy retry path in src/client.js with exponential backoff, and cover it with a test that proves the delays grow.

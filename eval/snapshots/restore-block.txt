@@ -1,0 +1,45 @@
+<bandaid-restored-context>
+Another language model produced the summary immediately above from the earlier part of this conversation. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work.
+
+Bandaid is now restoring what a summary cannot carry. Treat the material below as authoritative primary source and the summary as secondary interpretation. Where they disagree, the material below wins.
+
+<verbatim-user-messages>
+Every instruction the user actually typed, word for word. Corrections and constraints are kept ahead of recent messages, so gaps in the numbering are older messages that were dropped, not reordering. Standing constraints, preferences, and corrections in here remain in force even if they were already satisfied once — re-read them before deciding what to do next.
+
+<user-message n="1" of="3" ts="2026-07-26T10:00:00.000Z">
+Port the retry logic to the new client
+</user-message>
+<user-message n="2" of="3" ts="2026-07-26T10:04:00.000Z">
+don't touch anything under vendor/
+</user-message>
+<user-message n="3" of="3" ts="2026-07-26T10:11:00.000Z">
+also add a test for the timeout path
+</user-message>
+</verbatim-user-messages>
+
+<turn-tool-digests>
+What was actually run and what came back, per turn. Use this instead of re-running work that already happened; check current state before trusting any result as still true.
+
+--- turn 1 — 2 tool calls ---
+  user asked: Port the retry logic to the new client
+  1. Bash [FAILED]
+     args: npm test
+     result:
+     | Error: 1 failing
+  2. Edit
+     args: src/client.js :: retryLegacy(
+     result:
+     | ok
+</turn-tool-digests>
+
+<active-goal>
+This objective survived the compaction and is still open:
+
+Port the retry logic to the new client
+
+It is done when all of these are true, and not before:
+1. npm test exits 0
+2. src/client.js no longer references retryLegacy
+3. the backoff delays actually grow
+</active-goal>
+</bandaid-restored-context>

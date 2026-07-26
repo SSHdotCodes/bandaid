@@ -58,6 +58,9 @@ runHook('SessionStart', ({ input, config }) => {
           'This objective was still open when the session was last active:',
           '',
           goal.objective,
+          ...((goal.criteria || []).length
+            ? ['', 'It is done when all of these are true, and not before:', ...goal.criteria.map((t, i) => `${i + 1}. ${t}`)]
+            : []),
           '',
           'Verify current state before assuming any of it is already done.',
           '</bandaid-active-goal>',

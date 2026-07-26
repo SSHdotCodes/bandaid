@@ -12,19 +12,31 @@
  * Exit code 2 hands stderr back to the model and continues the conversation,
  * which is how that audit is reproduced here. `stop_hook_active` and a
  * continuation cap bound it: once the budget is spent, the stop goes through.
+ *
+ * The audit alone still asks the model to grade itself. When a check command or
+ * the judge is configured, `verify.assess` runs first and outranks the model in
+ * both directions: proof closes the goal without waiting to be asked, and a
+ * failure blocks the stop with the actual output rather than another sermon.
  */
 
 const goals = require('../lib/goals');
 const ledger = require('../lib/ledger');
 const store = require('../lib/store');
+const verify = require('../lib/verify');
 const { approxTokenCount } = require('../lib/tokens');
 const { budgetLimitPrompt, continuationPrompt } = require('../lib/prompts');
 const { emitBlocking, runHook } = require('../lib/hookio');
 
-function estimateTokensUsed(sessionId, goal) {
+/** Turns recorded since the goal was set — the work the goal is accountable for. */
+function turnsForGoal(sessionId, goal) {
+  return store
+    .readTurns(sessionId)
+    .filter((turn) => !Number.isFinite(goal.turnIndex) || turn.turnIndex >= goal.turnIndex);
+}
+
+function estimateTokensUsed(turns) {
   let total = 0;
-  for (const turn of store.readTurns(sessionId)) {
-    if (Number.isFinite(goal.turnIndex) && turn.turnIndex < goal.turnIndex) continue;
+  for (const turn of turns) {
     for (const call of turn.calls || []) {
       total += approxTokenCount(call.input) + approxTokenCount(call.result);
     }
@@ -50,7 +62,8 @@ runHook('Stop', ({ input, config }) => {
 
   if (decision.action === 'allow' || !decision.goal) return 0;
 
-  const tokensUsed = estimateTokensUsed(sessionId, decision.goal);
+  const turns = turnsForGoal(sessionId, decision.goal);
+  const tokensUsed = estimateTokensUsed(turns);
   const cmd = goals.completeCommand(sessionId);
 
   if (decision.action === 'wrap-up') {
@@ -65,12 +78,50 @@ runHook('Stop', ({ input, config }) => {
     return 2;
   }
 
+  // About to block. Before spending a continuation on another round of
+  // self-assessment, let anything outside the model have its say.
+  const assessment = verify.assess({
+    goal: decision.goal,
+    config,
+    cwd: input.cwd,
+    turns,
+  });
+
+  // Proof outranks the model in the generous direction too: a goal whose check
+  // passes is finished whether or not the model got around to saying so.
+  if (assessment.proven) {
+    goals.saveGoal(sessionId, {
+      ...decision.goal,
+      status: 'complete',
+      tokensUsed,
+      note: assessment.reason,
+    });
+    return 0;
+  }
+
+  const scored = goals.recordReason(decision.goal, assessment.reason);
+
+  // Same verification failure twice running means the loop has stopped
+  // converging. Another turn is a worse bet than handing it back to the user.
+  if (goals.plateauReached(scored, config)) {
+    goals.saveGoal(sessionId, { ...scored, status: 'budget_limited', tokensUsed });
+    emitBlocking(budgetLimitPrompt({ ...scored, tokensUsed }, { completeCommand: cmd }));
+    return 2;
+  }
+
   const updated = goals.saveGoal(sessionId, {
-    ...decision.goal,
-    continuations: (decision.goal.continuations || 0) + 1,
+    ...scored,
+    continuations: (scored.continuations || 0) + 1,
     tokensUsed,
   });
 
-  emitBlocking(continuationPrompt(updated, { completeCommand: cmd }));
+  emitBlocking(
+    continuationPrompt(updated, {
+      completeCommand: cmd,
+      criteriaCommand: goals.criteriaCommand(sessionId),
+      verification: assessment.verification,
+      checkCommand: updated.check ?? (config.goals || {}).check ?? null,
+    }),
+  );
   return 2;
 });

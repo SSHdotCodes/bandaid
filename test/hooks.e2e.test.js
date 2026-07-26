@@ -21,14 +21,14 @@ const SESSION = 'e2e-session-0001';
 
 after(() => fs.rmSync(HOME, { recursive: true, force: true }));
 
-function runHook(script, input) {
+function runHook(script, input, extraEnv = {}) {
   const file = path.join(ROOT, 'src', 'hooks', script);
   const result = { code: 0, stdout: '', stderr: '' };
   try {
     result.stdout = execFileSync(process.execPath, [file], {
       input: JSON.stringify(input),
       encoding: 'utf8',
-      env: { ...process.env, BANDAID_HOME: HOME, BANDAID_CONFIG: path.join(HOME, 'config.json') },
+      env: { ...process.env, BANDAID_HOME: HOME, BANDAID_CONFIG: path.join(HOME, 'config.json'), ...extraEnv },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch (err) {
@@ -183,6 +183,81 @@ describe('hook lifecycle', () => {
     } finally {
       cli(['on']);
     }
+  });
+});
+
+describe('verification gate', () => {
+  const SESSION_CHECK = 'e2e-session-check';
+
+  function armGoal(sessionId, prompt, env = {}) {
+    runHook('user-prompt-submit.js', { session_id: sessionId, cwd: ROOT, prompt }, env);
+    runHook('post-tool-batch.js', {
+      session_id: sessionId,
+      cwd: ROOT,
+      tool_calls: [{ tool_name: 'Edit', tool_input: { file_path: '/repo/src/auth.ts' }, tool_response: 'Applied 1 edit' }],
+    }, env);
+  }
+
+  it('a passing check closes the goal without waiting to be told', () => {
+    armGoal(SESSION_CHECK, 'Migrate the auth module off JWT entirely');
+
+    const result = runHook(
+      'stop.js',
+      { session_id: SESSION_CHECK, cwd: ROOT, stop_hook_active: false },
+      { BANDAID_GOAL_CHECK: 'exit 0' },
+    );
+    assert.equal(result.code, 0, 'proof outranks the model in the generous direction too');
+
+    const goal = JSON.parse(fs.readFileSync(path.join(HOME, 'sessions', SESSION_CHECK, 'goal.json'), 'utf8'));
+    assert.equal(goal.status, 'complete');
+  });
+
+  it('a failing check blocks the stop and hands back the real output', () => {
+    const session = 'e2e-session-check-fail';
+    armGoal(session, 'Make the whole suite green before shipping');
+
+    const result = runHook(
+      'stop.js',
+      { session_id: session, cwd: ROOT, stop_hook_active: false },
+      { BANDAID_GOAL_CHECK: 'echo "FAIL src/auth.test.ts:41"; exit 1' },
+    );
+    assert.equal(result.code, 2);
+    assert.ok(result.stderr.includes('FAIL src/auth.test.ts:41'), 'the model gets the failure, not another sermon');
+    assert.ok(result.stderr.includes('not up for debate'), 'and it is framed as external, not as self-assessment');
+  });
+
+  it('the same failure twice running ends the loop early', () => {
+    const session = 'e2e-session-plateau';
+    const failing = { BANDAID_GOAL_CHECK: 'echo "identical failure"; exit 1', BANDAID_MAX_CONTINUATIONS: '10' };
+    // The cap has to be raised when the goal is created; it is stamped onto the
+    // goal, not read from config at stop time.
+    armGoal(session, 'Fix the flaky integration test for good', failing);
+
+    const first = runHook('stop.js', { session_id: session, cwd: ROOT }, failing);
+    assert.equal(first.code, 2);
+
+    const second = runHook('stop.js', { session_id: session, cwd: ROOT }, failing);
+    assert.equal(second.code, 2);
+
+    // Third identical verdict: the loop has stopped converging well short of
+    // the 10 continuations it was allowed.
+    const third = runHook('stop.js', { session_id: session, cwd: ROOT }, failing);
+    assert.ok(third.stderr.includes('reached its continuation budget'), 'a plateau is not worth another seven turns');
+
+    const goal = JSON.parse(fs.readFileSync(path.join(HOME, 'sessions', session, 'goal.json'), 'utf8'));
+    assert.equal(goal.status, 'budget_limited');
+  });
+
+  it('a check that cannot run is treated as unproven, never as proof', () => {
+    const session = 'e2e-session-badcheck';
+    armGoal(session, 'Ship the parser rewrite with tests');
+
+    const result = runHook(
+      'stop.js',
+      { session_id: session, cwd: ROOT },
+      { BANDAID_GOAL_CHECK: 'definitely-not-a-real-command-xyz' },
+    );
+    assert.equal(result.code, 2, 'a broken check must not silently close goals');
   });
 });
 

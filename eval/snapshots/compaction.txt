@@ -1,0 +1,18 @@
+You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
+
+Be concise, structured, and focused on helping the next LLM seamlessly continue the work.
+
+Additional fidelity requirements for this checkpoint:
+- Summarize each turn together with the turn's own tool calls: include the tool names, the parameters that mattered, and what the results actually said. A summary that records "searched the codebase" without recording what was found is a failed summary.
+- Preserve exact identifiers verbatim: file paths, line numbers, function and symbol names, command lines, env vars, URLs, error strings, version numbers, and IDs. Never paraphrase an identifier.
+- Preserve every user instruction, correction, preference, and constraint, including ones that were satisfied earlier. A constraint stated once still binds.
+- Record decisions with their reasons, and record rejected alternatives with why they were rejected, so the next model does not re-litigate settled choices or retry known dead ends.
+- Record what was tried and failed, with the failure mode. This is as valuable as what succeeded.
+- State the current work-in-progress precisely: which file, which function, which step, and what the very next action is.
+- Do not editorialize about the conversation, and do not compress by dropping specifics. Prefer a dense, structured, factual record over readable prose.
