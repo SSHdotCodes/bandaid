@@ -1,0 +1,224 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { after, describe, it } = require('node:test');
+
+/**
+ * End-to-end hook contract.
+ *
+ * These run the real hook scripts the way Claude Code runs them — JSON on
+ * stdin, meaning carried by the exit code — against a throwaway state dir.
+ * They are the tests that would catch a change breaking the integration.
+ */
+
+const ROOT = path.resolve(__dirname, '..');
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'bandaid-e2e-'));
+const SESSION = 'e2e-session-0001';
+
+after(() => fs.rmSync(HOME, { recursive: true, force: true }));
+
+function runHook(script, input) {
+  const file = path.join(ROOT, 'src', 'hooks', script);
+  const result = { code: 0, stdout: '', stderr: '' };
+  try {
+    result.stdout = execFileSync(process.execPath, [file], {
+      input: JSON.stringify(input),
+      encoding: 'utf8',
+      env: { ...process.env, BANDAID_HOME: HOME, BANDAID_CONFIG: path.join(HOME, 'config.json') },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    result.code = err.status ?? 1;
+    result.stdout = err.stdout || '';
+    result.stderr = err.stderr || '';
+  }
+  return result;
+}
+
+function cli(args) {
+  return execFileSync(process.execPath, [path.join(ROOT, 'bin', 'bandaid.js'), ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, BANDAID_HOME: HOME, BANDAID_CONFIG: path.join(HOME, 'config.json') },
+  });
+}
+
+const PROMPT_ONE = 'Port the tokenizer to Rust. Do not add any dependencies.';
+const PROMPT_TWO = 'Now make the tests pass.';
+
+describe('hook lifecycle', () => {
+  it('UserPromptSubmit records the prompt and stays silent', () => {
+    const result = runHook('user-prompt-submit.js', {
+      session_id: SESSION,
+      cwd: ROOT,
+      prompt: PROMPT_ONE,
+    });
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout.trim(), '', 'must cost zero tokens on the happy path');
+
+    const ledger = fs.readFileSync(path.join(HOME, 'sessions', SESSION, 'prompts.jsonl'), 'utf8');
+    assert.ok(ledger.includes(PROMPT_ONE));
+  });
+
+  it('PostToolBatch records call arguments and results', () => {
+    const result = runHook('post-tool-batch.js', {
+      session_id: SESSION,
+      cwd: ROOT,
+      tool_calls: [
+        {
+          tool_name: 'Edit',
+          tool_input: { file_path: '/repo/src/tokenizer.rs', old_string: 'fn old()' },
+          tool_response: 'Applied 1 edit',
+        },
+        {
+          tool_name: 'Bash',
+          tool_input: { command: 'cargo test', description: 'run the suite' },
+          tool_response: 'test result: FAILED. 2 passed; 1 failed',
+        },
+      ],
+    });
+    assert.equal(result.code, 0);
+
+    const turns = fs.readFileSync(path.join(HOME, 'sessions', SESSION, 'turns.jsonl'), 'utf8');
+    assert.ok(turns.includes('/repo/src/tokenizer.rs'));
+    assert.ok(turns.includes('cargo test'));
+    assert.ok(turns.includes('2 passed; 1 failed'));
+  });
+
+  it('PreCompact replaces the summarization directive with Codex\'s', () => {
+    const result = runHook('pre-compact.js', { session_id: SESSION, cwd: ROOT, trigger: 'auto' });
+    assert.equal(result.code, 0);
+    assert.ok(result.stdout.includes('CONTEXT CHECKPOINT COMPACTION'));
+    assert.ok(result.stdout.includes('Summarize each turn together with the turn'));
+  });
+
+  it('PreCompact still honours a manual /compact instruction', () => {
+    const result = runHook('pre-compact.js', {
+      session_id: SESSION,
+      cwd: ROOT,
+      trigger: 'manual',
+      custom_instructions: 'focus on the failing test',
+    });
+    assert.ok(result.stdout.includes('focus on the failing test'));
+    assert.ok(result.stdout.includes('CONTEXT CHECKPOINT COMPACTION'));
+  });
+
+  it('SessionStart(compact) replays the prompt verbatim with its tool results', () => {
+    runHook('user-prompt-submit.js', { session_id: SESSION, cwd: ROOT, prompt: PROMPT_TWO });
+
+    const result = runHook('session-start.js', { session_id: SESSION, cwd: ROOT, source: 'compact' });
+    assert.equal(result.code, 0);
+    assert.ok(result.stdout.includes(PROMPT_ONE), 'the first instruction survives compaction word for word');
+    assert.ok(result.stdout.includes(PROMPT_TWO));
+    assert.ok(result.stdout.includes('cargo test'), 'tool arguments survive');
+    assert.ok(result.stdout.includes('2 passed; 1 failed'), 'tool results survive');
+    assert.ok(result.stdout.includes('<bandaid-restored-context>'));
+  });
+
+  it('SessionStart(startup) injects nothing', () => {
+    const result = runHook('session-start.js', { session_id: SESSION, cwd: ROOT, source: 'startup' });
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout.trim(), '');
+  });
+
+  it('Stop lets a turn that changed nothing end untouched', () => {
+    // PROMPT_TWO is the live goal but no tool has run against it yet.
+    const result = runHook('stop.js', { session_id: SESSION, cwd: ROOT, stop_hook_active: false });
+    assert.equal(result.code, 0, 'a read-only turn is not worth a completion audit');
+  });
+
+  it('Stop blocks an unfinished goal with the completion audit', () => {
+    runHook('post-tool-batch.js', {
+      session_id: SESSION,
+      cwd: ROOT,
+      tool_calls: [{ tool_name: 'Edit', tool_input: { file_path: '/repo/src/lib.rs' }, tool_response: 'Applied 1 edit' }],
+    });
+
+    const result = runHook('stop.js', { session_id: SESSION, cwd: ROOT, stop_hook_active: false });
+    assert.equal(result.code, 2, 'exit 2 is what hands feedback back to the model');
+    assert.ok(result.stderr.includes('Completion audit'));
+    assert.ok(result.stderr.includes(PROMPT_TWO), 'the objective is the live user request');
+    assert.ok(result.stderr.includes('goal complete'), 'the model is told how to close it');
+  });
+
+  it('Stop never loops: stop_hook_active always lets the turn end', () => {
+    const result = runHook('stop.js', { session_id: SESSION, cwd: ROOT, stop_hook_active: true });
+    assert.equal(result.code, 0);
+    assert.equal(result.stderr.trim(), '');
+  });
+
+  it('Stop gives up once the continuation budget is spent', () => {
+    // One continuation was already consumed above; default budget is 2.
+    const second = runHook('stop.js', { session_id: SESSION, cwd: ROOT, stop_hook_active: false });
+    assert.equal(second.code, 2);
+
+    const third = runHook('stop.js', { session_id: SESSION, cwd: ROOT, stop_hook_active: false });
+    assert.equal(third.code, 0, 'a goal the model cannot finish degrades into a normal stop');
+  });
+
+  it('marking the goal complete stops the blocking immediately', () => {
+    runHook('user-prompt-submit.js', { session_id: SESSION, cwd: ROOT, prompt: 'Add the changelog entry please' });
+    runHook('post-tool-batch.js', {
+      session_id: SESSION,
+      cwd: ROOT,
+      tool_calls: [{ tool_name: 'Write', tool_input: { file_path: 'CHANGELOG.md' }, tool_response: 'ok' }],
+    });
+
+    assert.equal(runHook('stop.js', { session_id: SESSION, cwd: ROOT }).code, 2, 'blocks while open');
+    cli(['goal', 'complete', '--session', SESSION]);
+    assert.equal(runHook('stop.js', { session_id: SESSION, cwd: ROOT }).code, 0, 'allows once closed');
+  });
+
+  it('the kill switch disables every hook', () => {
+    cli(['off']);
+    try {
+      runHook('user-prompt-submit.js', { session_id: SESSION, cwd: ROOT, prompt: 'Another real instruction here' });
+      const stop = runHook('stop.js', { session_id: SESSION, cwd: ROOT });
+      assert.equal(stop.code, 0);
+      const compact = runHook('pre-compact.js', { session_id: SESSION, cwd: ROOT, trigger: 'auto' });
+      assert.equal(compact.stdout.trim(), '');
+    } finally {
+      cli(['on']);
+    }
+  });
+});
+
+describe('session isolation', () => {
+  it('a fresh session in the same directory does not inherit the previous ledger', () => {
+    const fresh = 'e2e-session-fresh';
+    runHook('session-start.js', { session_id: fresh, cwd: ROOT, source: 'startup' });
+    runHook('user-prompt-submit.js', { session_id: fresh, cwd: ROOT, prompt: 'A brand new unrelated task' });
+
+    const prompts = fs.readFileSync(path.join(HOME, 'sessions', fresh, 'prompts.jsonl'), 'utf8');
+    assert.ok(prompts.includes('A brand new unrelated task'));
+    assert.ok(!prompts.includes(PROMPT_ONE), 'must not replay another conversation');
+  });
+
+  it('a forked session does carry the ledger forward', () => {
+    const forked = 'e2e-session-forked';
+    // The pointer currently names the fresh session, which has one prompt.
+    runHook('session-start.js', { session_id: forked, cwd: ROOT, source: 'fork' });
+
+    const prompts = fs.readFileSync(path.join(HOME, 'sessions', forked, 'prompts.jsonl'), 'utf8');
+    assert.ok(prompts.includes('A brand new unrelated task'), 'a fork continues the conversation it came from');
+  });
+});
+
+describe('hook robustness', () => {
+  it('survives empty, malformed, and hostile input without failing the session', () => {
+    for (const script of ['user-prompt-submit.js', 'post-tool-batch.js', 'pre-compact.js', 'post-compact.js', 'session-start.js', 'stop.js']) {
+      for (const input of [{}, { session_id: '' }, { session_id: '../../escape' }, { session_id: SESSION, tool_calls: 'not-an-array' }]) {
+        const result = runHook(script, input);
+        assert.notEqual(result.code, 1, `${script} must not hard-fail on ${JSON.stringify(input)}`);
+      }
+    }
+  });
+
+  it('refuses to write outside the state dir', () => {
+    runHook('user-prompt-submit.js', { session_id: '../../../etc/evil', cwd: ROOT, prompt: 'x'.repeat(50) });
+    assert.ok(!fs.existsSync(path.join(HOME, '..', '..', '..', 'etc', 'evil')));
+  });
+});

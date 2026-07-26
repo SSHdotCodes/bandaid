@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "bandaid",
+  "version": "0.1.0",
+  "description": "Codex-style compaction and goals for Claude Code. Keeps every user prompt verbatim across a compaction, summarizes each turn with its own tool calls and results, and keeps objectives alive until completion is proven.",
+  "author": {
+    "name": "SSHdotCodes",
+    "url": "https://github.com/SSHdotCodes"
+  },
+  "homepage": "https://github.com/SSHdotCodes/bandaid",
+  "repository": "https://github.com/SSHdotCodes/bandaid",
+  "license": "Apache-2.0",
+  "keywords": [
+    "compaction",
+    "context",
+    "codex",
+    "goals",
+    "memory"
+  ]
+}

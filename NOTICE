@@ -1,0 +1,30 @@
+Bandaid
+Copyright 2026 SSHdotCodes
+
+This product includes software and prompt text derived from OpenAI Codex
+(https://github.com/openai/codex), licensed under the Apache License, Version 2.0.
+
+Derived material:
+
+  src/lib/prompts.js
+    - SUMMARIZATION_PROMPT is reproduced verbatim from
+      codex-rs/prompts/templates/compact/prompt.md
+    - SUMMARY_PREFIX is reproduced verbatim from
+      codex-rs/prompts/templates/compact/summary_prefix.md
+    - continuationPrompt() is adapted from
+      codex-rs/prompts/templates/goals/continuation.md
+    - budgetLimitPrompt() is adapted from
+      codex-rs/prompts/templates/goals/budget_limit.md
+
+  src/lib/tokens.js
+    - approxTokenCount, splitBudget, splitString, and the middle-out
+      truncation behaviour are a JavaScript port of
+      codex-rs/utils/string/src/truncate.rs
+
+  src/lib/restore.js
+    - selectWithinBudget reproduces the selection algorithm of
+      build_compacted_history_with_limit in codex-rs/core/src/compact.rs,
+      including the COMPACT_USER_MESSAGE_MAX_TOKENS budget of 20000.
+
+Bandaid is not affiliated with or endorsed by OpenAI or Anthropic.
+Claude and Claude Code are trademarks of Anthropic. Codex is a trademark of OpenAI.

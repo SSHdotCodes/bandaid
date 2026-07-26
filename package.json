@@ -1,0 +1,45 @@
+{
+  "name": "bandaid-cc",
+  "version": "0.1.0",
+  "description": "Replaces Claude Code's compaction and goal handling with Codex's: user prompts kept verbatim, turns summarized with their own tool calls and results, and objectives that survive until they are provably done.",
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "codex",
+    "compaction",
+    "context",
+    "hooks"
+  ],
+  "homepage": "https://github.com/SSHdotCodes/bandaid#readme",
+  "bugs": {
+    "url": "https://github.com/SSHdotCodes/bandaid/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SSHdotCodes/bandaid.git"
+  },
+  "license": "Apache-2.0",
+  "author": "SSHdotCodes",
+  "type": "commonjs",
+  "bin": {
+    "bandaid": "bin/bandaid.js"
+  },
+  "main": "src/lib/restore.js",
+  "files": [
+    "bin",
+    "src",
+    "hooks",
+    "commands",
+    ".claude-plugin",
+    "NOTICE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "doctor": "node bin/bandaid.js doctor"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {}
+}
