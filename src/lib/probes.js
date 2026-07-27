@@ -38,6 +38,18 @@ const EXIT_ABSTAIN = 78;
 
 const DEFAULT_TIMEOUT_MS = 600000;
 
+/**
+ * Probes Bandaid ships, referenced by name so the manifest stays portable.
+ *
+ * Both are zero-dependency by design: `"dependencies": {}` is a feature, and a
+ * probe that needs an install is a probe most projects will not run.
+ */
+const BUILTINS = {
+  secrets: path.join(__dirname, '..', 'probes', 'secrets.js'),
+  load: path.join(__dirname, '..', 'probes', 'load.js'),
+  sweep: path.join(__dirname, '..', 'probes', 'sweep.js'),
+};
+
 // --- manifest ------------------------------------------------------------
 
 function manifestPath(cwd, config) {
@@ -64,7 +76,11 @@ function loadManifest(cwd, config) {
   for (const entry of list) {
     if (!entry || typeof entry !== 'object') continue;
     const id = String(entry.id || '').trim();
-    const run = String(entry.run || '').trim();
+    // A builtin resolves to a script Bandaid ships, so a committed manifest
+    // carries no machine-specific path and a fix to the probe reaches every
+    // project that uses it. `run` still wins when both are given.
+    const builtin = BUILTINS[String(entry.builtin || '').trim()] || null;
+    const run = String(entry.run || '').trim() || (builtin ? `${JSON.stringify(process.execPath)} ${JSON.stringify(builtin)}` : '');
     if (!id || !run || seen.has(id)) continue;
     seen.add(id);
     probes.push({

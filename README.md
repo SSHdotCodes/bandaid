@@ -326,6 +326,67 @@ A probe still measuring cannot veto — every first stop after an edit would
 otherwise block — but it can **hold a close** once, so its answer is not thrown
 away by a goal closing a second early.
 
+### The four probes that ship with it
+
+Bandaid installs **no tooling** and takes **no dependencies**. Each of these is a
+skill that tells the model how to produce evidence, plus a grader that turns
+that evidence into an exit status.
+
+| probe | what it measures | abstains when |
+|---|---|---|
+| `browser` | a real browser at 375/768/1440: console errors, failed requests, horizontal overflow, the journey completing, and 2–5 assertions you wrote for the change | no report, or one from an earlier worktree |
+| `load` | sustained concurrency against a budget written beforehand: p95, p99, error rate, rps | no budgets file, or the service is not running |
+| `secrets` | credentials **this work introduced**, in the diff and in new untracked files | there is no git to diff against |
+| `sweep` | the same class of defect elsewhere, where every finding ships a command that fails now | nobody has swept, or there is no seed |
+
+Three are built in and need nothing installed:
+
+```json
+{ "probes": [
+  { "id": "secrets", "builtin": "secrets", "when": { "changed": ["**"] } },
+  { "id": "load",    "builtin": "load",    "when": { "changed": ["src/api/**"] } }
+] }
+```
+
+**The browser probe is the interesting one**, because "verify it at real viewport
+sizes like a user would" is not one assertion — it is four, and only the last
+needs judgement:
+
+1. the journey completes at every width;
+2. zero console errors and zero failed requests;
+3. `scrollWidth <= innerWidth` at every width;
+4. nothing visually broken that 1–3 miss.
+
+The first three fail loudly, cheaply, and without a model. The fourth is why
+screenshots are still taken, and it is graded against a rubric that ends with
+*"if you would say it would look better, that is not a finding"* — because the
+failure mode of a model grading a screenshot is an unbounded list of taste
+notes, and a probe that returns one never passes.
+
+The skill picks a driver in order — the project's own Playwright or Puppeteer,
+then `npx playwright` **only if browsers are already installed**, then a browser
+MCP server, then nothing. It never runs `playwright install`: downloading 300 MB
+inside a verification is a side effect nobody asked for.
+
+There is one gate worth naming on its own: **every screenshot must exist and
+exceed 1 KB.** The cheapest way to pass a browser probe is to write a clean
+report without opening a browser, and a real PNG per viewport is a crude, cheap
+barrier to exactly that.
+
+**Sweep** is the one that turns "are there bugs" into an exit code. There isn't
+one, so it does not invent one — instead every finding must ship a command
+expected to fail *right now*, and the runtime runs it:
+
+```
+reproExit !== 0  →  confirmed bug
+reproExit === 0  →  discarded as unreproducible
+```
+
+The agents propose and only the runtime touches a shell, which is what keeps a
+fan-out of read-only searchers safe to trust. A finding cannot mark itself
+confirmed, the same asymmetry that stops the model writing `supported` into the
+evidence ledger. Dismissing one takes a reason, in a reviewable file.
+
 ### Expectations: predictions, not memories
 
 ```
@@ -643,6 +704,18 @@ the first compaction after install replays prompts from before Bandaid existed.
   two projects, which is usually what you want and occasionally is not. Outside
   git it falls back to the directory, so moving a non-git project loses its
   record.
+- **The shipped probes measure a delta, not a codebase.** `secrets` fails on
+  what this work introduced and reports the rest; `sweep` needs a seed. That is
+  deliberate — an absolute gate fails every real repository on day one and is
+  switched off on day two — but it means neither is an audit.
+- **A sweep reproduction runs in the working directory**, with a 60-second cap
+  and Bandaid disarmed, not in a sandbox. One that reaches the network or
+  installs something escapes that; the skill says not to write one and nothing
+  enforces it.
+- **The built-in load generator is not a good load generator.** Fixed
+  concurrency, one machine, `fetch`. It catches a fall from 2000 rps to 40. It
+  will not tell 1900 from 2000, and it measures a regression rather than a
+  production ceiling.
 - **A probe that abstains looks like verification and provides none.** Four
   armed probes that all exit 78 leave a goal nobody is watching. `bandaid probe
   status` and `bandaid verify` both say so; nothing stops you ignoring them.
@@ -669,7 +742,7 @@ the first compaction after install replays prompts from before Bandaid existed.
 ## Development
 
 ```bash
-npm test          # 280 tests, no dependencies, no network
+npm test          # 302 tests, no dependencies, no network
 npm run eval      # measures the judge against fixtures; needs `claude` on PATH
 node bin/bandaid.js doctor
 ```

@@ -29,6 +29,7 @@
     "bin",
     "src",
     "hooks",
+    "skills",
     "commands",
     ".claude-plugin",
     "NOTICE",
