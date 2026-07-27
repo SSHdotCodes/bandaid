@@ -850,6 +850,34 @@ Each run withholds one block and reports the same matrix. **A mechanism whose
 ablation moves no number is a mechanism to delete**, and saying so in advance is
 what makes deleting it a result rather than a defeat.
 
+**The first number this produced is a null result, and it is about the ledger:**
+
+```
+$ npm run eval                      accuracy 10/10   precision 100%
+$ npm run eval -- --ablate ledger   accuracy 10/10   precision 100%
+```
+
+Withholding the evidence ledger from the judge changed nothing. On this suite it
+does not earn its tokens.
+
+Two things are true about that and both are worth stating:
+
+- **It is a real result.** The ledger was added on the reasoning that a judge
+  which knows what was already tried grades better. These ten fixtures say it
+  does not — and the ledger costs up to 3000 tokens on every judged stop.
+- **The suite cannot measure what the ledger is for.** Every fixture is a
+  single-shot judgement over a fresh repository that already contains the ground
+  truth, so a judge that reads the files needs no history. The ledger exists for
+  the case none of these cover: day three, where the dead end was walked on day
+  one and the repository has no memory of it. Both runs also sit at 100%, so the
+  suite has no headroom to show a difference in either direction.
+
+The honest reading is therefore *unmeasured*, not *useless* — and the fix is a
+fixture the harness cannot express yet: two sequential judgements over a
+repository that changes between them. Until that exists, the ledger is an
+unmeasured bet, which is exactly what `karpathy-report.md` warns against, now
+labelled as one instead of assumed to be fine.
+
 One honest gap: the 277-word completion audit **cannot** be ablated here,
 because it lives in the continuation prompt and the judge never sees it.
 Measuring it needs a different harness — one that runs the loop rather than the

@@ -25,6 +25,15 @@ const { stampMatches } = require('./stamp');
  * measured from an exit status, and the model may only ever append an
  * `unverified` claim. A claim is a lead for the judge to follow, never a
  * finding — which is exactly the distinction the whole system exists to keep.
+ *
+ * ponytail: `npm run eval -- --ablate ledger` scores 10/10, identical to a
+ * plain run — on that suite this file earns nothing, and it costs up to 3000
+ * tokens per judged stop. It is kept because the suite cannot test what it is
+ * for: every fixture is one judgement over a fresh repository that already
+ * contains the ground truth, so a judge that reads the files needs no history.
+ * The case this exists for is day three, where the dead end was walked on day
+ * one. Treat it as unmeasured rather than proven, and delete it if a
+ * two-judgement fixture ever shows it still moves nothing. Reviewed 2026-07-28.
  */
 
 const KINDS = new Set(['check', 'probe', 'judge', 'claim', 'blocker', 'violation', 'expect']);
