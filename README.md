@@ -177,6 +177,49 @@ completion audit grades them one at a time instead of re-deriving requirements.
 They cannot be quietly rewritten later — `bandaid goal criteria` refuses to move
 a bar that is already fixed unless you pass `--replace`.
 
+### Across days: an objective that outlives its session
+
+Everything above is scoped to one session. Close the terminal on a three-day
+refactor and the objective, its fixed criteria, its constraints and its blockers
+were all still on disk — under a session id nothing would ever look up again.
+
+So a goal now has a second home, keyed by the **project** rather than the
+conversation:
+
+```
+~/.claude/bandaid/projects/<sha256(git toplevel)>/handoff.json
+```
+
+It is a projection, not the source of truth. The live goal stays in the session
+directory and the hot path is unchanged; the project record is written whenever
+the goal moves and read only at session start and by the CLI. Git decides what a
+project is, so `claude` from `src/` is the same project as `claude` from the
+repository root — the old per-cwd hash said otherwise.
+
+**A new session is offered the objective, not given it.** The default,
+`goals.carryOver: "offer"`, names the objective, its age, and its bar, states
+plainly that nothing is armed, and gives the one command that takes it up
+alongside the one that drops it:
+
+```
+bandaid goal adopt      # take up this project's open objective
+bandaid goal history    # what it is, how old, which sessions have worked it
+bandaid goal clear --project
+```
+
+Adopting carries the bar across unchanged — criteria, constraints, blockers and
+the commit the work started from — and the budget across fresh: a new day earns
+a new continuation allowance, re-resolved against today's verifier.
+
+`"auto"` adopts without asking, which is the unattended overnight mode and will
+occasionally pick up an unrelated task from the same repository. `"off"` is the
+behaviour before any of this existed.
+
+A `--resume` or `--fork` needs none of it: the goal now travels with the ledger,
+as it always should have. And `/clear` drops the session's copy while leaving
+the project record — clearing your scrollback is not the same as abandoning
+three days of work.
+
 ### Blockers: the difference between "not yet" and "not from here"
 
 A loop that only knows *unfinished* treats "the tests don't pass yet" and "proving
@@ -396,7 +439,9 @@ Env overrides for one-off runs: `BANDAID_ENABLED`, `BANDAID_COMPACT`,
 ## Where your data goes
 
 `~/.claude/bandaid/sessions/<session-id>/` — `prompts.jsonl` (verbatim),
-`turns.jsonl` (tool digests), `goal.json`, `summaries.jsonl`, `meta.json`. All
+`turns.jsonl` (tool digests), `goal.json`, `summaries.jsonl`, `meta.json`, plus
+`~/.claude/bandaid/projects/<key>/handoff.json` for the objective a project left
+open. All
 local, never transmitted. Delete the directory at any time; Bandaid rebuilds what
 it can from Claude Code's own transcript.
 
@@ -451,21 +496,20 @@ the first compaction after install replays prompts from before Bandaid existed.
   that would otherwise be blocked, and needs `claude` on `PATH`. It is off by
   default for that reason. If it cannot run it abstains silently rather than
   blocking.
-- **Two sessions in one directory confuse the CLI.** The hooks are fine — they
-  always get a `session_id` from Claude Code and each session's ledger and goal
-  stay separate on disk. But `bandaid` invoked without `--session` resolves the
-  session through a single per-directory pointer (`current/<sha256(cwd)>.json`)
-  that both sessions overwrite, so the last one to submit a prompt wins. The
-  slash commands do not pass `--session`, which means `/bandaid:goal-done` in
-  one session can close the other's goal. Pass `--session <id>` explicitly, or
-  keep one session per directory, until the pointer is per-session.
-- **A goal survives a resume, not a fresh start.** `--resume` and `--fork` carry
-  the open objective, its criteria, its constraints and its recorded blockers
-  into the new session, along with the prompt ledger. A plain `claude` in the
-  same directory tomorrow deliberately inherits **nothing** — a fresh session
-  must not replay another conversation's instructions — so a genuinely
-  multi-day objective currently needs `--resume`. Project-scoped goals that a
-  new session can adopt on purpose are the next thing to build.
+- **Two sessions in one directory used to confuse the CLI.** Each session now
+  drops its own pointer and any command that *writes* a goal refuses rather than
+  guessing, listing both ids and asking for `--session`. Reads still resolve to
+  whichever prompted last.
+- **A fresh session is offered the project's objective, never given it.** That
+  is deliberate — a session must not replay another conversation's instructions
+  — but it means unattended multi-day work needs `goals.carryOver: "auto"`, and
+  in that mode a second, unrelated task started in the same repository will pick
+  up the first one's objective. `bandaid goal history` is how you find out, and
+  `goal clear --project` is how you stop it.
+- **The project key is the git toplevel.** Two worktrees of one repository are
+  two projects, which is usually what you want and occasionally is not. Outside
+  git it falls back to the directory, so moving a non-git project loses its
+  record.
 - **Nothing was ever deleted before now.** Retention is on by default and sweeps
   at most once a day from `SessionStart`; `bandaid sessions prune --dry-run`
   shows what it would take first.
@@ -478,7 +522,7 @@ the first compaction after install replays prompts from before Bandaid existed.
 ## Development
 
 ```bash
-npm test          # 166 tests, no dependencies, no network
+npm test          # 202 tests, no dependencies, no network
 npm run eval      # measures the judge against fixtures; needs `claude` on PATH
 node bin/bandaid.js doctor
 ```

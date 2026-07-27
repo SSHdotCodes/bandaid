@@ -14,6 +14,7 @@ const {
   SUMMARIZATION_PROMPT,
   budgetLimitPrompt,
   continuationPrompt,
+  openObjectivePrompt,
   violationPrompt,
 } = require('../src/lib/prompts');
 
@@ -48,7 +49,15 @@ function matchesSnapshot(name, actual) {
 }
 
 // Fixed inputs: nothing here may depend on the clock, cwd, or the environment.
-const base = { ...newGoal('Port the retry logic to the new client', { maxContinuations: 2 }), continuations: 1 };
+// `newGoal` reads git for baseSha and the project root, so both are pinned —
+// neither is rendered today, and a snapshot that silently depends on which
+// worktree ran it is a snapshot that fails on someone else's machine.
+const base = {
+  ...newGoal('Port the retry logic to the new client', { maxContinuations: 2 }),
+  baseSha: null,
+  projectRoot: null,
+  continuations: 1,
+};
 const withCriteria = {
   ...base,
   criteria: ['npm test exits 0', 'src/client.js no longer references retryLegacy', 'the backoff delays actually grow'],
@@ -56,7 +65,38 @@ const withCriteria = {
 };
 const opts = { completeCommand: 'node /bandaid.js goal complete --session S', criteriaCommand: 'node /bandaid.js goal criteria --session S "first" "second"' };
 
+const OPEN_RECORD = {
+  projectRoot: '/repo',
+  sessionId: 'S1',
+  updatedAt: '2026-07-25T09:12:00.000Z',
+  goal: {
+    objective: 'Replace the polling sync with a websocket transport, do not break the REST fallback',
+    criteria: ['src/sync/ws.js exists and the client connects on start', 'test/sync-fallback.test.js still passes'],
+    constraints: ['do not break the REST fallback'],
+    blockers: ['the staging websocket endpoint needs a VPN this session cannot reach'],
+    blockedStreak: 1,
+    status: 'active',
+    sessions: ['S1', 'S2', 'S3'],
+  },
+};
+
 describe('prompt snapshots', () => {
+  it('open objective — offered to a session that has not taken it up', () => {
+    matchesSnapshot(
+      'open-objective-offer',
+      openObjectivePrompt(OPEN_RECORD, {
+        adopted: false,
+        adoptCommand: 'node /bandaid.js goal adopt --session S',
+        clearCommand: 'node /bandaid.js goal clear --project',
+        ageDays: 2,
+      }),
+    );
+  });
+
+  it('open objective — adopted outright in unattended mode', () => {
+    matchesSnapshot('open-objective-adopted', openObjectivePrompt(OPEN_RECORD, { adopted: true, ageDays: 1 }));
+  });
+
   it('continuation — no criteria recorded yet', () => {
     matchesSnapshot('continuation-bare', continuationPrompt(base, opts));
   });

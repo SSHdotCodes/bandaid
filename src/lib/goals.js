@@ -3,6 +3,7 @@
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+const project = require('./project');
 const { looksLikeCorrection } = require('./restore');
 const store = require('./store');
 
@@ -120,6 +121,14 @@ function criteriaCommand(sessionId) {
   return `node ${JSON.stringify(cliPath())} goal criteria --session ${sessionId} "first" "second"`;
 }
 
+function adoptCommand(sessionId) {
+  return `node ${JSON.stringify(cliPath())} goal adopt --session ${sessionId}`;
+}
+
+function clearProjectCommand() {
+  return `node ${JSON.stringify(cliPath())} goal clear --project`;
+}
+
 function blockCommand(sessionId) {
   return `node ${JSON.stringify(cliPath())} goal block --session ${sessionId} "what is blocked and what would unblock it"`;
 }
@@ -187,6 +196,9 @@ function newGoal(
     objective: String(objective).trim(),
     // The commit this goal started from. See baseSha().
     baseSha: baseSha(cwd),
+    // Where this goal's project lives, so every later save can record the
+    // objective against the project without the caller having to carry a cwd.
+    projectRoot: project.projectRoot(cwd),
     // What must not happen, kept apart from what must. See extractConstraints.
     constraints: extractConstraints(objective),
     // What "done" means, fixed once and re-injected verbatim every turn.
@@ -345,8 +357,24 @@ function loadGoal(sessionId) {
   return goal;
 }
 
+/**
+ * Persist the goal, and mirror it to the project it belongs to.
+ *
+ * The session copy is the source of truth and the only thing the hot path
+ * reads. The project copy is what makes tomorrow possible: a new session can
+ * find out an objective was left open here without inheriting anyone's ledger.
+ */
 function saveGoal(sessionId, goal) {
-  return store.writeGoal(sessionId, { ...goal, updatedAt: new Date().toISOString() });
+  const saved = store.writeGoal(sessionId, { ...goal, updatedAt: new Date().toISOString() });
+  if (saved.projectRoot) {
+    try {
+      project.writeHandoff(saved.projectRoot, sessionId, saved);
+    } catch {
+      // The project record is a convenience. Losing it must never cost the
+      // goal, which is already safely on disk.
+    }
+  }
+  return saved;
 }
 
 function setGoal(sessionId, objective, opts = {}) {
@@ -370,6 +398,47 @@ function setCriteria(sessionId, criteria, { source = 'model', replace = false } 
   if (!normalized.length) return goal;
   if (!replace && (goal.criteria || []).length) return goal;
   return saveGoal(sessionId, { ...goal, criteria: normalized, criteriaSource: source });
+}
+
+/**
+ * Take up an objective this project left open, in a session that has none.
+ *
+ * The bar does not move: criteria, constraints, blockers and the originating
+ * commit all come across exactly as they were. What is fresh is the budget —
+ * a new day earns a new continuation allowance, resolved against today's
+ * config and the adopted verifier rather than yesterday's.
+ *
+ * Refuses when the session already has a goal. A live objective always beats a
+ * remembered one.
+ */
+function adoptHandoff(sessionId, cwd, config, { turnIndex = 0 } = {}) {
+  const record = project.readHandoff(cwd);
+  if (!record || !record.goal || record.goal.status !== 'active') return null;
+  if (loadGoal(sessionId)) return null;
+
+  const carried = record.goal;
+  const adopted = {
+    ...newGoal(carried.objective, {
+      source: carried.source || 'explicit',
+      cwd,
+      turnIndex,
+      check: carried.check ?? null,
+    }),
+    criteria: carried.criteria || [],
+    criteriaSource: carried.criteriaSource || null,
+    constraints: carried.constraints || [],
+    blockers: carried.blockers || [],
+    blockedStreak: carried.blockedStreak || 0,
+    // The commit the work started from, not the one it resumes at: "what has
+    // this goal changed" has to span every day it ran.
+    baseSha: carried.baseSha ?? null,
+    createdAt: carried.createdAt,
+    check: carried.check ?? null,
+    adoptedFrom: record.sessionId || null,
+  };
+  adopted.maxContinuations = resolveMaxContinuations(config, adopted);
+
+  return saveGoal(sessionId, adopted);
 }
 
 function closeGoal(sessionId, status, note = null) {
@@ -437,9 +506,12 @@ module.exports = {
   MUTATING_TOOLS,
   TERMINAL_STATUSES,
   addBlocker,
+  adoptCommand,
+  adoptHandoff,
   baseSha,
   blockCommand,
   blockedOut,
+  clearProjectCommand,
   closeGoal,
   extractConstraints,
   completeCommand,

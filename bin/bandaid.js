@@ -8,6 +8,7 @@ const config = require('../src/lib/config');
 const goals = require('../src/lib/goals');
 const install = require('../src/lib/install');
 const ledger = require('../src/lib/ledger');
+const project = require('../src/lib/project');
 const store = require('../src/lib/store');
 const verify = require('../src/lib/verify');
 const { buildRestoreBlock } = require('../src/lib/restore');
@@ -53,6 +54,27 @@ function resolveSession(flags) {
   return null;
 }
 
+/**
+ * Commands that change a goal must not guess which session they mean.
+ *
+ * Two Claude Code sessions in one directory both drop a pointer here. Without
+ * `--session` the CLI would take whichever prompted most recently, so
+ * `goal complete` in one session could close the other's objective — reported
+ * behaviour, and adopting an objective makes it worse rather than better.
+ * Returns true when the caller should stop.
+ */
+function refuseIfAmbiguous(flags) {
+  if (flags.session) return false;
+  if (store.sanitizeId(process.env.CLAUDE_SESSION_ID)) return false;
+
+  const recent = store.ambiguousSessions(flags.cwd || process.cwd());
+  if (recent.length < 2) return false;
+
+  fail(`${recent.length} sessions are active in this directory; pass --session <id> to say which you mean`);
+  for (const entry of recent) process.stderr.write(`  ${entry.sessionId}  last prompt ${entry.ts}\n`);
+  return true;
+}
+
 const USAGE = `bandaid ${pkg.version} — Codex-style compaction and goals for Claude Code
 
 Usage: bandaid <command> [options]
@@ -73,7 +95,9 @@ Usage: bandaid <command> [options]
   goal block <reason>        Record something this environment cannot do, and keep going
   goal complete [note]       Mark the objective achieved (this is what the model calls)
   goal blocked [note]        Mark the whole objective blocked and stop
-  goal clear                 Drop the objective entirely
+  goal adopt | goal resume   Take up the objective this project left open
+  goal history               Show the project's open objective and its sessions
+  goal clear [--project]     Drop the session's objective, or the project's record
   verify                     Run the check command and the judge now, and report
 
   inspect [--session ID]     Summarize the ledger for a session
@@ -167,6 +191,16 @@ function cmdDoctor(flags) {
     notes.push(`Stop budget ${stopHook.timeout}s clears verifyTimeoutMs ${Math.round(verifyMs / 1000)}s`);
   }
 
+  // "Why did my goal not carry over?" is usually "you are in a different
+  // worktree than you think", and this is the only place that answer lives.
+  const cwd = flags.cwd || process.cwd();
+  const root = project.projectRoot(cwd);
+  notes.push(`project ${root} (${project.projectKey(cwd)})${root === cwd ? '' : ` from ${cwd}`}`);
+  const handoff = project.readHandoff(cwd);
+  if (handoff && handoff.goal.status === 'active') {
+    notes.push(`open objective recorded, last worked ${project.ageInDays(handoff.updatedAt)} day(s) ago`);
+  }
+
   for (const note of notes) out(`  ok    ${note}`);
   for (const problem of problems) out(`  FAIL  ${problem}`);
   if (problems.length) process.exitCode = 1;
@@ -191,8 +225,49 @@ function cmdToggle(enabled) {
   out(`bandaid is now ${enabled ? 'enabled' : 'disabled'} (${config.configPath()})`);
 }
 
+// Reads are fine to guess at; writes are not.
+const GOAL_WRITES = new Set(['set', 'criteria', 'complete', 'done', 'block', 'blocked', 'clear', 'adopt', 'resume']);
+
+/** The project's own record, independent of whatever session is running. */
+function cmdGoalProject(sub, flags) {
+  const cwd = flags.cwd || process.cwd();
+
+  if (sub === 'clear') {
+    project.clearHandoff(cwd);
+    out('Project objective cleared. The session goal, if any, is untouched.');
+    return;
+  }
+
+  const record = project.readHandoff(cwd);
+  if (!record) {
+    out('No open objective recorded for this project.');
+    return;
+  }
+  if (flags.json) {
+    out(JSON.stringify(record, null, 2));
+    return;
+  }
+  out(`project:  ${record.projectRoot}`);
+  out(`updated:  ${record.updatedAt} (${project.ageInDays(record.updatedAt)} day(s) ago)`);
+  out(`status:   ${record.goal.status}`);
+  out(`criteria: ${(record.goal.criteria || []).length}`);
+  out(`sessions: ${(record.goal.sessions || []).length}`);
+  for (const id of record.goal.sessions || []) out(`  ${id}`);
+  out('');
+  out(record.goal.objective);
+}
+
 function cmdGoal(positional, flags) {
   const [sub, ...rest] = positional;
+
+  // Project-scoped operations do not belong to any session, so they neither
+  // need one resolved nor care that two are running here.
+  if (sub === 'history' || (sub === 'clear' && flags.project)) {
+    return cmdGoalProject(sub, flags);
+  }
+
+  if (GOAL_WRITES.has(sub || '') && refuseIfAmbiguous(flags)) return;
+
   const sessionId = resolveSession(flags);
 
   if (!sessionId) {
@@ -326,9 +401,45 @@ function cmdGoal(positional, flags) {
       out(goal ? 'Goal marked blocked.' : 'No active goal to block.');
       return;
     }
+    // Take up an objective this project left open. `resume` is an alias
+    // because both words describe it and nobody should have to guess which.
+    case 'adopt':
+    case 'resume': {
+      const cwd = flags.cwd || process.cwd();
+      const record = project.readHandoff(cwd);
+      if (!record || record.goal.status !== 'active') {
+        out('No open objective recorded for this project.');
+        return;
+      }
+      if (goals.loadGoal(sessionId)) {
+        fail('this session already has a goal; clear it first if you mean to replace it');
+        return;
+      }
+      const adopted = goals.adoptHandoff(sessionId, cwd, config.loadConfig(), {
+        turnIndex: ledger.currentTurnIndex(sessionId),
+      });
+      if (!adopted) {
+        fail('could not adopt the objective');
+        return;
+      }
+      const age = project.ageInDays(record.updatedAt);
+      out(`Adopted the objective for ${record.projectRoot}.`);
+      out('');
+      out(`  ${adopted.objective}`);
+      out('');
+      out(`  age          ${age === 0 ? 'today' : `${age} day(s)`}, ${(record.goal.sessions || []).length} session(s)`);
+      out(`  criteria     ${(adopted.criteria || []).length}`);
+      out(`  constraints  ${(adopted.constraints || []).length}`);
+      out(`  blockers     ${(adopted.blockers || []).length}`);
+      out(`  check        ${adopted.check || config.loadConfig().goals.check || 'none'}`);
+      out(`  budget       0/${adopted.maxContinuations} continuations (fresh)`);
+      out('');
+      out('Verify current state before assuming any of it is already done.');
+      return;
+    }
     case 'clear': {
       store.clearGoal(sessionId);
-      out('Goal cleared.');
+      out('Goal cleared. The project record survives; pass --project to drop that too.');
       return;
     }
     default:

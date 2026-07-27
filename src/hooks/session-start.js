@@ -15,9 +15,10 @@
 
 const goals = require('../lib/goals');
 const ledger = require('../lib/ledger');
+const project = require('../lib/project');
 const store = require('../lib/store');
 const { buildRestoreBlock } = require('../lib/restore');
-const { blockersSection, constraintsSection } = require('../lib/prompts');
+const { blockersSection, constraintsSection, openObjectivePrompt } = require('../lib/prompts');
 const { emit, runHook } = require('../lib/hookio');
 
 /**
@@ -47,6 +48,46 @@ function sweepIfDue(config) {
   }
 }
 
+/**
+ * Surface an objective this project left open, if there is one and policy says
+ * to. Returns true when it emitted something, so the caller can stop.
+ *
+ * "offer" arms nothing: the block names the objective and the one command that
+ * takes it up, and says plainly that no stop will be blocked until it is. That
+ * is the default because force-feeding an objective into an unrelated session
+ * is the worse error, and a model told the facts will decide better than a
+ * policy can.
+ */
+function carryOver(config, sessionId, cwd) {
+  const settings = config.goals || {};
+  if (!config.enabled || settings.enabled === false || settings.mode === 'off') return false;
+
+  const mode = settings.carryOver || 'offer';
+  if (mode === 'off') return false;
+
+  const record = project.readHandoff(cwd);
+  if (!record || !record.goal || record.goal.status !== 'active') return false;
+
+  const ageDays = project.ageInDays(record.updatedAt);
+
+  if (mode === 'auto') {
+    const adopted = goals.adoptHandoff(sessionId, cwd, config);
+    if (!adopted) return false;
+    emit(openObjectivePrompt(record, { adopted: true, ageDays }));
+    return true;
+  }
+
+  emit(
+    openObjectivePrompt(record, {
+      adopted: false,
+      adoptCommand: goals.adoptCommand(sessionId),
+      clearCommand: goals.clearProjectCommand(),
+      ageDays,
+    }),
+  );
+  return true;
+}
+
 runHook('SessionStart', ({ input, config }) => {
   const sessionId = input.session_id;
   if (!store.sanitizeId(sessionId)) return 0;
@@ -63,6 +104,9 @@ runHook('SessionStart', ({ input, config }) => {
 
   if (source === 'clear') {
     // A cleared conversation should not drag an old objective into the new one.
+    // The project record survives on purpose: deleting a multi-day objective
+    // because someone cleared their scrollback is data loss, and `goal clear
+    // --project` is the way to mean it.
     store.clearGoal(sessionId);
     store.updateMeta(sessionId, { pendingRestore: false });
     return 0;
@@ -81,6 +125,13 @@ runHook('SessionStart', ({ input, config }) => {
 
   if (source !== 'compact') {
     const goal = goals.loadGoal(sessionId);
+
+    // Nothing carried through the ledger, but this project has an objective
+    // that was never closed. Offer it, or take it up, depending on policy —
+    // never silently, because a session that starts working yesterday's task
+    // because it saw the words is worse than one that never heard of it.
+    if (!goal && carryOver(config, sessionId, cwd)) return 0;
+
     if ((source === 'resume' || source === 'fork') && goal && goal.status === 'active') {
       emit(
         [

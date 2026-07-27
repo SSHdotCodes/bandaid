@@ -58,6 +58,13 @@ const DEFAULTS = {
     // Skip the completion audit for turns that changed nothing.
     skipTrivialTurns: true,
 
+    // What a brand-new session does about an objective left open in this
+    // project. "offer" names it and arms nothing, so picking it up is a
+    // decision; "auto" adopts it, which is the unattended multi-day mode and
+    // will occasionally pick up an unrelated task from the same repository;
+    // "off" is the behaviour before project records existed.
+    carryOver: 'offer',
+
     // Shell command that proves the objective is done. Exit 0 closes the goal;
     // any other status vetoes the stop no matter how finished the model feels.
     // Set per goal with `bandaid goal set ... --check`, or globally here.
@@ -167,6 +174,7 @@ function envOverrides() {
   const goalsEnabled = bool('BANDAID_GOALS');
   if (goalsEnabled !== undefined) goals.enabled = goalsEnabled;
   if (process.env.BANDAID_GOAL_MODE) goals.mode = process.env.BANDAID_GOAL_MODE;
+  if (process.env.BANDAID_CARRY_OVER) goals.carryOver = process.env.BANDAID_CARRY_OVER;
   const maxCont = int('BANDAID_MAX_CONTINUATIONS');
   if (maxCont !== undefined) goals.maxContinuations = maxCont;
   if (process.env.BANDAID_GOAL_CHECK) goals.check = process.env.BANDAID_GOAL_CHECK;

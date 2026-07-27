@@ -363,26 +363,87 @@ function pruneSessions({ maxAgeDays = 30, maxCount = 200, dryRun = false, now = 
 /**
  * Slash commands run in a shell that may not carry CLAUDE_SESSION_ID on every
  * Claude Code build, so each hook drops a per-cwd pointer to the live session.
+ *
+ * There is one pointer *per session* under a per-cwd directory, plus a
+ * `latest` naming whichever prompted most recently. A single flat file per cwd
+ * was ambiguous the moment two sessions ran in one directory — they overwrote
+ * each other, and `goal complete` in one could close the other's objective.
+ * Enumerating them is what lets the CLI notice the ambiguity and say so.
  */
-function pointerFile(cwd) {
-  const key = crypto.createHash('sha256').update(String(cwd || process.cwd())).digest('hex').slice(0, 16);
-  return path.join(pointerDir(), `${key}.json`);
+function cwdKey(cwd) {
+  return crypto.createHash('sha256').update(String(cwd || process.cwd())).digest('hex').slice(0, 16);
+}
+
+function pointerCwdDir(cwd) {
+  return path.join(pointerDir(), cwdKey(cwd));
+}
+
+function pointerFile(cwd, sessionId) {
+  return path.join(pointerCwdDir(cwd), `${sessionId}.json`);
+}
+
+function latestPointerFile(cwd) {
+  return path.join(pointerCwdDir(cwd), 'latest.json');
+}
+
+/** The pre-directory layout, still read so an upgrade does not lose the live session. */
+function legacyPointerFile(cwd) {
+  return path.join(pointerDir(), `${cwdKey(cwd)}.json`);
 }
 
 function setCurrentSession(sessionId, cwd) {
   const id = sanitizeId(sessionId);
   if (!id) return;
-  writeJson(pointerFile(cwd), { sessionId: id, cwd: cwd || process.cwd(), ts: new Date().toISOString() });
+  const record = { sessionId: id, cwd: cwd || process.cwd(), ts: new Date().toISOString() };
+  writeJson(pointerFile(cwd, id), record);
+  writeJson(latestPointerFile(cwd), record);
 }
 
 function getCurrentSession(cwd) {
   const explicit = sanitizeId(process.env.CLAUDE_SESSION_ID);
   if (explicit) return explicit;
-  const pointer = readJson(pointerFile(cwd));
+  const pointer = readJson(latestPointerFile(cwd)) || readJson(legacyPointerFile(cwd));
   return pointer && sanitizeId(pointer.sessionId) ? pointer.sessionId : null;
 }
 
+/**
+ * Every session seen in this directory, most recent first.
+ *
+ * The CLI uses this to refuse an ambiguous `goal complete` rather than closing
+ * whichever objective happened to prompt last.
+ */
+function sessionsForCwd(cwd) {
+  let entries;
+  try {
+    entries = fs.readdirSync(pointerCwdDir(cwd), { withFileTypes: true });
+  } catch {
+    const legacy = readJson(legacyPointerFile(cwd));
+    return legacy && sanitizeId(legacy.sessionId) ? [{ sessionId: legacy.sessionId, ts: legacy.ts || '' }] : [];
+  }
+
+  const out = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.name === 'latest.json' || !entry.name.endsWith('.json')) continue;
+    const record = readJson(path.join(pointerCwdDir(cwd), entry.name));
+    if (record && sanitizeId(record.sessionId)) out.push({ sessionId: record.sessionId, ts: record.ts || '' });
+  }
+  return out.sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
+}
+
+/**
+ * Sessions that prompted in this directory within `windowMs` of each other.
+ * More than one means the pointer cannot say which is meant.
+ */
+function ambiguousSessions(cwd, { windowMs = 60 * 60 * 1000, now = Date.now() } = {}) {
+  const recent = sessionsForCwd(cwd).filter((s) => {
+    const ts = Date.parse(s.ts || '');
+    return Number.isFinite(ts) && now - ts < windowMs;
+  });
+  return recent.length > 1 ? recent : [];
+}
+
 module.exports = {
+  ambiguousSessions,
   appendJsonl,
   clearGoal,
   ensureSessionDir,
@@ -406,6 +467,7 @@ module.exports = {
   sanitizeId,
   sessionDir,
   sessionsDir,
+  sessionsForCwd,
   setCurrentSession,
   turnsFile,
   updateMeta,

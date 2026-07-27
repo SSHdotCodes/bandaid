@@ -429,6 +429,92 @@ describe('goals across a resume', () => {
   });
 });
 
+describe('an objective that outlives its session', () => {
+  const WORKDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bandaid-carry-'));
+  after(() => fs.rmSync(WORKDIR, { recursive: true, force: true }));
+
+  const OBJECTIVE = 'Replace the polling sync with a websocket transport, do not break the REST fallback';
+
+  it('records the objective against the project, not only the session', () => {
+    runHook('user-prompt-submit.js', { session_id: 'carry-day-one', cwd: WORKDIR, prompt: OBJECTIVE });
+    cli(['goal', 'criteria', '--session', 'carry-day-one', '--', 'ws client connects on start', 'REST fallback still passes']);
+
+    const handoff = JSON.parse(cli(['goal', 'history', '--cwd', WORKDIR, '--json']));
+    assert.equal(handoff.goal.objective, OBJECTIVE);
+    assert.equal(handoff.goal.criteria.length, 2);
+    assert.deepEqual(handoff.goal.sessions, ['carry-day-one']);
+  });
+
+  it('offers it to a brand-new session without arming anything', () => {
+    const result = runHook('session-start.js', { session_id: 'carry-offer', cwd: WORKDIR, source: 'startup' });
+
+    assert.ok(result.stdout.includes(OBJECTIVE), 'the objective is named');
+    assert.ok(result.stdout.includes('ws client connects on start'), 'so is the bar it was fixed at');
+    assert.ok(result.stdout.includes('NOT working that objective'), 'and the fact that nothing is armed');
+    assert.ok(result.stdout.includes('goal adopt'), 'with the one command that takes it up');
+    assert.ok(result.stdout.includes('goal clear --project'), 'and the one that drops it');
+
+    assert.ok(
+      !fs.existsSync(path.join(HOME, 'sessions', 'carry-offer', 'goal.json')),
+      'offering must not create a goal; adoption is a decision, not an accident',
+    );
+  });
+
+  it('takes it up on request, with the bar intact and the budget fresh', () => {
+    cli(['goal', 'adopt', '--session', 'carry-offer', '--cwd', WORKDIR]);
+
+    const goal = JSON.parse(fs.readFileSync(path.join(HOME, 'sessions', 'carry-offer', 'goal.json'), 'utf8'));
+    assert.equal(goal.objective, OBJECTIVE);
+    assert.equal(goal.criteria.length, 2);
+    assert.equal(goal.continuations, 0);
+    assert.equal(goal.adoptedFrom, 'carry-day-one');
+  });
+
+  it('adopts it outright when told to run unattended', () => {
+    const result = runHook(
+      'session-start.js',
+      { session_id: 'carry-auto', cwd: WORKDIR, source: 'startup' },
+      { BANDAID_CARRY_OVER: 'auto' },
+    );
+
+    assert.ok(result.stdout.includes('Resuming the objective'));
+    assert.ok(fs.existsSync(path.join(HOME, 'sessions', 'carry-auto', 'goal.json')));
+  });
+
+  it('says nothing at all when carry-over is off', () => {
+    const result = runHook(
+      'session-start.js',
+      { session_id: 'carry-off', cwd: WORKDIR, source: 'startup' },
+      { BANDAID_CARRY_OVER: 'off' },
+    );
+
+    assert.equal(result.stdout.trim(), '');
+    assert.ok(!fs.existsSync(path.join(HOME, 'sessions', 'carry-off', 'goal.json')));
+  });
+
+  it('survives a /clear, which drops the session copy and keeps the project record', () => {
+    runHook('session-start.js', { session_id: 'carry-auto', cwd: WORKDIR, source: 'clear' });
+
+    assert.ok(
+      !fs.existsSync(path.join(HOME, 'sessions', 'carry-auto', 'goal.json')),
+      'a cleared conversation must not drag its objective into the next one',
+    );
+    const handoff = JSON.parse(cli(['goal', 'history', '--cwd', WORKDIR, '--json']));
+    assert.equal(handoff.goal.objective, OBJECTIVE, 'clearing scrollback is not the same as abandoning the work');
+  });
+
+  it('stops offering once the objective is closed', () => {
+    cli(['goal', 'complete', '--session', 'carry-offer']);
+    const result = runHook('session-start.js', { session_id: 'carry-after', cwd: WORKDIR, source: 'startup' });
+    assert.equal(result.stdout.trim(), '');
+  });
+
+  it('drops the project record when that is what was meant', () => {
+    cli(['goal', 'clear', '--project', '--cwd', WORKDIR]);
+    assert.match(cli(['goal', 'history', '--cwd', WORKDIR]), /No open objective/);
+  });
+});
+
 describe('hook robustness', () => {
   it('survives empty, malformed, and hostile input without failing the session', () => {
     for (const script of ['user-prompt-submit.js', 'post-tool-batch.js', 'pre-compact.js', 'post-compact.js', 'session-start.js', 'stop.js']) {
