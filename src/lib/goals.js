@@ -64,6 +64,15 @@ function verifierStrength(config, goal) {
   const settings = (config && config.goals) || {};
   const check = goal && goal.check != null ? goal.check : settings.check;
   if (String(check == null ? '' : check).trim()) return 'verified';
+
+  // Probes and expectations rank with the judge rather than above it. The
+  // leash exists to bound false closes, and neither can cause one -- they veto
+  // and never prove -- so they make the loop safer, not longer. An earlier
+  // draft gave them a tier of their own; nobody can calibrate that number
+  // against the ones already here, and an uncalibratable number is worse than
+  // a wrong one because it looks principled.
+  if (goal && Array.isArray(goal.expectations) && goal.expectations.length) return 'judged';
+  if (goal && Array.isArray(goal.probes) && goal.probes.length) return 'judged';
   if (settings.judge === true) return 'judged';
   return 'unverified';
 }
@@ -192,6 +201,8 @@ function newGoal(
     check = null,
     criteria = [],
     cwd = null,
+    probes = null,
+    scope = [],
   } = {},
 ) {
   const now = new Date().toISOString();
@@ -226,6 +237,16 @@ function newGoal(
     // the configured default. Exit 0 is the only thing that closes a goal
     // without the model's say-so.
     check,
+    // The probes armed for this goal, frozen when it was set so a manifest
+    // edited mid-goal cannot retroactively move the bar. null means "not
+    // frozen" — a goal that predates the manifest takes it as it stands.
+    probes,
+    // Paths this goal declared it would touch. Set membership where the
+    // constraint regex was prose.
+    scope: Array.isArray(scope) ? scope : [],
+    // Predictions the model records as it works, run by the runtime at every
+    // stop. See src/lib/selfcheck.js for why the timing is the whole point.
+    expectations: [],
     // Work this environment cannot do, as the model reported it. Re-injected so
     // the loop stops asking, and counted so it eventually stops looping.
     blockers: [],

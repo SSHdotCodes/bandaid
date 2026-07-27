@@ -97,6 +97,8 @@ Usage: bandaid <command> [options]
   goal set <objective>       Set the objective explicitly
       --check "<command>"    Close the goal automatically when this exits 0
       --budget <tokens>      Stop continuing after roughly this many tokens
+      --probe <id>           Arm a specific probe (repeatable; default is the manifest)
+      --scope <glob>         Declare a path this goal may touch (repeatable)
   goal criteria [<c> ...]    Record the fixed acceptance criteria, or list them
       --replace              Overwrite criteria that were already fixed
   goal block <reason>        Record something this environment cannot do, and keep going
@@ -105,7 +107,18 @@ Usage: bandaid <command> [options]
   goal adopt | goal resume   Take up the objective this project left open
   goal history               Show the project's open objective and its sessions
   goal clear [--project]     Drop the session's objective, or the project's record
+  goal expect <cmd>          Record a prediction now: --says <output>, or --file/--contains
+  goal scope <glob>...       Declare the paths this goal may touch
   verify                     Run the check command and the judge now, and report
+  self-check                 Which criteria have measured evidence, and which do not
+
+  probes list                The project's probe manifest and its trust state
+  probes trust [--yes]       Approve the manifest's exact contents so it may run
+  probes untrust             Withdraw approval
+  probe status               What each probe last said about this worktree
+  probe run <id>             Run one now and cache the verdict
+  probe arm|disarm <id>      Change which probes this goal is graded by
+  probe clear [<id>]         Drop cached verdicts
 
   evidence show              The claims-with-pointers ledger for this objective
   evidence add <claim>       Record something you established (always unverified)
@@ -238,7 +251,9 @@ function cmdToggle(enabled) {
 }
 
 // Reads are fine to guess at; writes are not.
-const GOAL_WRITES = new Set(['set', 'criteria', 'complete', 'done', 'block', 'blocked', 'clear', 'adopt', 'resume']);
+const GOAL_WRITES = new Set([
+  'set', 'criteria', 'complete', 'done', 'block', 'blocked', 'clear', 'adopt', 'resume', 'expect', 'scope',
+]);
 
 /** The project's own record, independent of whatever session is running. */
 function cmdGoalProject(sub, flags) {
@@ -333,7 +348,20 @@ function cmdGoal(positional, flags) {
       const cfg = config.loadConfig();
       const check = typeof flags.check === 'string' ? flags.check : null;
       const cwd = flags.cwd || process.cwd();
+
+      // Freeze the armed probe set now, the same discipline criteria follow: a
+      // manifest edited mid-goal must not retroactively move the bar. An
+      // explicit --probe list wins; otherwise the trusted manifest as it stands.
+      const explicitProbes = flags.probe ? [].concat(flags.probe).filter((p) => typeof p === 'string') : null;
+      const armed =
+        explicitProbes ||
+        require('../src/lib/probes')
+          .trustedProbes(cfg, { projectRoot: project.projectRoot(cwd) }, cwd)
+          .map((p) => p.id);
+
       goals.setGoal(sessionId, objective, {
+        probes: armed.length ? armed : null,
+        scope: flags.scope ? [].concat(flags.scope).filter((s) => typeof s === 'string') : [],
         source: 'explicit',
         // Resolved with the check in hand, so `--check` earns the longer leash
         // in the same breath that it supplies the thing doing the verifying.
@@ -449,6 +477,45 @@ function cmdGoal(positional, flags) {
       out('Verify current state before assuming any of it is already done.');
       return;
     }
+    case 'expect': {
+      const goal = goals.loadGoal(sessionId);
+      if (!goal) {
+        fail('no active goal to record an expectation against');
+        return;
+      }
+      const selfcheck = require('../src/lib/selfcheck');
+      const command = rest.join(' ').trim() || null;
+      const next = selfcheck.addExpectation(goal.expectations, {
+        command,
+        file: typeof flags.file === 'string' ? flags.file : null,
+        says: typeof flags.says === 'string' ? flags.says : null,
+        contains: typeof flags.contains === 'string' ? flags.contains : null,
+      });
+      if (!next) {
+        fail('goal expect needs a command, or --file <path> [--contains <text>]');
+        return;
+      }
+      const updated = goals.saveGoal(sessionId, { ...goal, expectations: next });
+      out(`Recorded. ${updated.expectations.length} expectation(s) will be run at every stop.`);
+      out('If one stops holding, the stop is blocked with what it said instead.');
+      return;
+    }
+    case 'scope': {
+      const goal = goals.loadGoal(sessionId);
+      if (!goal) {
+        fail('no active goal to scope');
+        return;
+      }
+      if (!rest.length) {
+        const declared = goal.scope || [];
+        if (!declared.length) out('No scope declared; this goal may touch anything.');
+        for (const glob of declared) out(`  ${glob}`);
+        return;
+      }
+      const updated = goals.saveGoal(sessionId, { ...goal, scope: rest });
+      out(`Scoped to ${updated.scope.length} path pattern(s). Changes anywhere else block the stop.`);
+      return;
+    }
     case 'clear': {
       store.clearGoal(sessionId);
       out('Goal cleared. The project record survives; pass --project to drop that too.');
@@ -489,10 +556,26 @@ function cmdVerify(flags) {
     return;
   }
 
+  // Probes report even when they did not decide the verdict — otherwise "why
+  // does it keep going?" is answerable for the check and not for them.
+  const probes = result.probes || {};
+  for (const passed of probes.passed || []) out(`probe ${passed.probeId}: PASS${passed.summary ? ` — ${passed.summary}` : ''}`);
+  for (const pending of probes.pending || []) out(`probe ${pending.probeId}: still running`);
+  for (const abstained of probes.abstained || []) {
+    out(`probe ${abstained.probeId}: abstained${abstained.summary ? ` — ${abstained.summary}` : ''}`);
+    if (abstained.summons) out(`  the ${abstained.summons} skill is what produces the evidence it wants`);
+  }
+
   if (!result.verification) {
-    out('No verification configured for this goal.');
+    const armed = (probes.passed || []).length + (probes.pending || []).length + (probes.abstained || []).length;
+    if (armed) {
+      out('');
+      out('Probes veto but never prove, so none of the above can close this goal on its own.');
+    }
+    out('Nothing here can prove this objective done.');
     out('Add one with:  bandaid goal set "<objective>" --check "npm test"');
     out(`Or turn the judge on in ${config.configPath()}:  {"goals":{"judge":true}}`);
+    process.exitCode = 1;
     return;
   }
 
@@ -636,6 +719,256 @@ function cmdEvidence(positional, flags) {
   }
 }
 
+/**
+ * Probes: the manifest, its trust state, and what each one last said.
+ *
+ * `trust` is the gate everything else waits behind. A committed manifest is
+ * arbitrary shell execution the moment somebody opens the repository, so
+ * nothing in it runs until its exact contents have been approved.
+ */
+function cmdProbes(positional, flags) {
+  const [sub = 'list'] = positional;
+  const cwd = flags.cwd || process.cwd();
+  const cfg = config.loadConfig();
+  const probes = require('../src/lib/probes');
+  const trust = require('../src/lib/trust');
+
+  const manifest = probes.loadManifest(cwd, cfg);
+  const file = probes.manifestPath(cwd, cfg);
+  const state = trust.status(cwd, file);
+
+  if (sub === 'trust') {
+    if (state.state === 'missing') {
+      fail(`no manifest at ${file}`);
+      return;
+    }
+    if (state.state === 'unsafe') {
+      fail(state.reason);
+      out('A manifest anyone else on this machine can rewrite is not made safe by being approved once.');
+      return;
+    }
+    if (state.state === 'trusted') {
+      out('Already trusted, and unchanged since.');
+      return;
+    }
+
+    out(`${state.state === 'changed' ? 'This manifest has changed since it was approved' : 'This manifest has never been approved'}:`);
+    out('');
+    out(fs.readFileSync(file, 'utf8').trimEnd());
+    out('');
+    out('Every command above will be run by Bandaid, in this project, with your permissions.');
+    if (!flags.yes) {
+      out('');
+      out('Re-run with --yes to approve it.');
+      process.exitCode = 1;
+      return;
+    }
+    trust.trust(cwd, file);
+    out(`Approved. ${manifest ? manifest.probes.length : 0} probe(s) may now run.`);
+    return;
+  }
+
+  if (sub === 'untrust') {
+    trust.untrust(cwd);
+    out('Approval withdrawn. Every probe in this project will abstain until it is approved again.');
+    return;
+  }
+
+  if (sub !== 'list') {
+    fail(`unknown probes subcommand "${sub}"`);
+    return;
+  }
+
+  out(`manifest: ${file}`);
+  out(`trust:    ${state.state}${state.reason ? ` (${state.reason})` : ''}`);
+  if (!manifest || !manifest.probes.length) {
+    out('');
+    out('No probes declared. See the bandaid-* skills for what a probe looks like.');
+    return;
+  }
+  if (state.state !== 'trusted') {
+    out('');
+    out('Every probe below is abstaining until the manifest is approved:  bandaid probes trust');
+  }
+  out('');
+  for (const probe of manifest.probes) {
+    out(`  ${probe.id}`);
+    if (probe.description) out(`      ${probe.description}`);
+    out(`      run:  ${probe.run}`);
+    if (probe.when && probe.when.changed) out(`      when: ${probe.when.changed.join(', ')} changed`);
+    if (probe.summons) out(`      skill:${probe.summons}`);
+  }
+}
+
+function cmdProbe(positional, flags) {
+  const [sub = 'status', name] = positional;
+  const sessionId = resolveSession(flags);
+  const goal = sessionId ? goals.loadGoal(sessionId) : null;
+  const cwd = flags.cwd || (goal && goal.projectRoot) || process.cwd();
+  const cfg = config.loadConfig();
+  const probes = require('../src/lib/probes');
+
+  if (sub === 'status') {
+    const rows = probes.probeStatus({ goal, config: cfg, cwd });
+    if (flags.json) {
+      out(JSON.stringify(rows, null, 2));
+      return;
+    }
+    if (!rows.length) {
+      out('No probes declared for this project.');
+      return;
+    }
+    for (const row of rows) {
+      const marks = [row.armed ? 'armed' : 'not armed', row.applicable ? 'applies' : 'not applicable to this goal'];
+      if (row.running) marks.push('running');
+      out(`  ${row.id.padEnd(12)} ${row.verdict.padEnd(8)} ${marks.join(', ')}`);
+      if (row.summary) out(`               ${row.summary}`);
+    }
+    return;
+  }
+
+  if (sub === 'clear') {
+    probes.clearCache(cwd, name || null);
+    out(name ? `Cleared the cached verdict for ${name}.` : 'Cleared every cached probe verdict.');
+    return;
+  }
+
+  if (sub === 'arm' || sub === 'disarm') {
+    if (!goal) {
+      fail('no active goal to arm a probe against');
+      return;
+    }
+    if (!name) {
+      fail(`probe ${sub} needs a probe id`);
+      return;
+    }
+    const manifest = probes.loadManifest(cwd, cfg);
+    const known = manifest ? manifest.probes.map((p) => p.id) : [];
+    if (sub === 'arm' && !known.includes(name)) {
+      fail(`no probe "${name}" in the manifest (${known.join(', ') || 'none declared'})`);
+      return;
+    }
+    const current = Array.isArray(goal.probes) ? goal.probes : known;
+    const next = sub === 'arm' ? [...new Set([...current, name])] : current.filter((id) => id !== name);
+    goals.saveGoal(sessionId, { ...goal, probes: next });
+    out(`${sub === 'arm' ? 'Armed' : 'Disarmed'} ${name}. Now armed: ${next.join(', ') || 'none'}.`);
+    return;
+  }
+
+  if (sub === 'run') {
+    if (!name) {
+      fail('probe run needs a probe id');
+      return;
+    }
+    const manifest = probes.loadManifest(cwd, cfg);
+    const probe = manifest && manifest.probes.find((p) => p.id === name);
+    if (!probe) {
+      fail(`no probe "${name}" in the manifest`);
+      return;
+    }
+    const trust = require('../src/lib/trust');
+    if (!trust.isTrusted(cwd, manifest.file)) {
+      fail('the manifest is not approved; run `bandaid probes trust` first');
+      return;
+    }
+
+    const { worktreeStamp } = require('../src/lib/stamp');
+    const stamp = worktreeStamp(cwd);
+    const result = probes.runProbe(probe, { cwd, goal, config: cfg, stampFp: stamp.fp });
+    probes.writeCache(cwd, name, result);
+
+    out(`${name}: ${result.verdict}${result.exitCode == null ? '' : ` (exit ${result.exitCode})`}`);
+    if (result.summary) out(`  ${result.summary}`);
+    for (const finding of result.findings || []) {
+      out(`  - ${finding.message || JSON.stringify(finding)}`);
+    }
+    if (result.verdict === 'fail') process.exitCode = 1;
+    return;
+  }
+
+  fail(`unknown probe subcommand "${sub}"`);
+}
+
+/**
+ * The completion audit, computed instead of asked for.
+ *
+ * `src/lib/prompts.js` spends 277 words asking the model to grade each
+ * criterion honestly and to treat absence of contradiction as absence of
+ * proof. This is that, as arithmetic over a file the model can only append
+ * unverified claims to — so it is not up for negotiation, and it names the one
+ * thing to do about each gap.
+ */
+function cmdSelfCheck(flags) {
+  const sessionId = resolveSession(flags);
+  const goal = sessionId ? goals.loadGoal(sessionId) : null;
+  if (!goal) {
+    fail('no active goal to check');
+    return;
+  }
+
+  const criteria = goal.criteria || [];
+  if (!criteria.length) {
+    out('This goal has no acceptance criteria, so there is nothing to grade against.');
+    out('Record 2–5 with `bandaid goal criteria`, and they become the fixed bar.');
+    return;
+  }
+  if (!goal.projectRoot) {
+    fail('this goal has no project, so no evidence has been recorded against it');
+    return;
+  }
+
+  const evidence = require('../src/lib/evidence');
+  const selfcheck = require('../src/lib/selfcheck');
+  const { worktreeStamp } = require('../src/lib/stamp');
+
+  const stamp = worktreeStamp(goal.projectRoot);
+  const entries = evidence.read(goal.projectRoot, { objectiveHash: evidence.objectiveHash(goal.objective) });
+  const rows = evidence.coverage(entries, criteria.length, stamp);
+  const covered = rows.filter((r) => r.state === 'covered').length;
+
+  if (flags.json) {
+    out(JSON.stringify({ covered, total: criteria.length, rows }, null, 2));
+    return;
+  }
+
+  out(`coverage: ${covered} of ${criteria.length} criteria have measured, current evidence.`);
+  if (stamp.method !== 'git') {
+    out('(no version control here, so every record counts as historical)');
+  }
+  out('');
+
+  const ADVICE = {
+    covered: null,
+    refuted: 'a verifier says this is not true right now — that is the thing to fix',
+    'claimed-only': 'you asserted this; nothing measured it. Add a check, a probe, or an expectation that fails if it stops being true.',
+    stale: 'this was measured before the worktree changed. Run it again.',
+    uncovered: 'nothing has been recorded for this criterion at all.',
+  };
+
+  for (const row of rows) {
+    out(`  ${row.criterion}. ${criteria[row.criterion - 1]}`);
+    const detail = row.record ? ` — ${row.record.claim}` : '';
+    out(`     ${row.state}${detail}`);
+    if (ADVICE[row.state]) out(`     ${ADVICE[row.state]}`);
+  }
+
+  const expectations = selfcheck.runExpectations(goal, { cwd: goal.projectRoot });
+  if (expectations.verdict !== 'abstain') {
+    out('');
+    out(`expectations: ${expectations.checked - expectations.failures.length} of ${expectations.checked} hold.`);
+    if (expectations.failures.length) out(selfcheck.renderFailures(expectations.failures));
+  }
+
+  const scope = selfcheck.checkScope(goal, { cwd: goal.projectRoot });
+  if (scope.verdict === 'fail') {
+    out('');
+    out(`scope: ${scope.violations.length} file(s) changed outside the declared paths.`);
+    for (const file of scope.violations.slice(0, 20)) out(`  ${file}`);
+  }
+
+  if (covered !== criteria.length) process.exitCode = 1;
+}
+
 function cmdSessions(positional, flags) {
   if ((positional[0] || '') === 'prune') {
     const retention = config.loadConfig().retention || {};
@@ -720,6 +1053,12 @@ function main(argv) {
       return cmdPrompt();
     case 'evidence':
       return cmdEvidence(positional, flags);
+    case 'probes':
+      return cmdProbes(positional, flags);
+    case 'probe':
+      return cmdProbe(positional, flags);
+    case 'self-check':
+      return cmdSelfCheck(flags);
     case 'sessions':
       return cmdSessions(positional, flags);
     default:

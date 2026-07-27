@@ -80,15 +80,46 @@ function verificationSection(verification) {
 
   const heading = 'Verification result (external — not your own assessment, and not up for debate):';
 
-  const body =
-    verification.source === 'check'
-      ? `${heading}
+  let body;
+  if (verification.source === 'check') {
+    body = `${heading}
 The command \`${verification.command}\` was run against the current worktree and did not succeed. Until it exits 0 this objective is not complete, however finished the work looks from here. Do not edit the command, weaken it, or work around it — make it pass.
 
 <check-output>
 ${escapeXmlText(verification.output)}
-</check-output>`
-      : `${heading}
+</check-output>`;
+  } else if (verification.source === 'expect') {
+    // The model's own prediction, made while the work happened. There is no
+    // other model in this loop, and nothing to argue with: it said what would
+    // be true and the runtime went and looked.
+    body = `${heading}
+You recorded these expectations as you worked, and they do not hold against the current worktree:
+
+<failed-expectations>
+${escapeXmlText(verification.output)}
+</failed-expectations>
+
+Either the change did not do what you predicted, or the prediction was wrong. Find out which, and fix whichever it was. Do not delete the expectation to make this go away.`;
+  } else if (verification.source === 'scope') {
+    body = `${heading}
+This goal declared the paths it would touch. These changed anyway:
+
+<out-of-scope-changes>
+${escapeXmlText(verification.output)}
+</out-of-scope-changes>
+
+If a change was genuinely needed, say so plainly in your final message rather than widening the scope quietly. If it was not, revert it.`;
+  } else if (verification.source === 'probe') {
+    body = `${heading}
+A probe ran against the current worktree and did not pass:
+
+<probe-result>
+${escapeXmlText(verification.output)}
+</probe-result>
+
+A probe reports what it measured, not an opinion about it. Address what it found; do not edit the probe, weaken its thresholds, or work around it.`;
+  } else {
+    body = `${heading}
 A separate reviewer inspected the current state of the repository — not this conversation — and found the objective not yet satisfied:
 
 <reviewer-finding>
@@ -96,6 +127,7 @@ ${escapeXmlText(verification.output)}
 </reviewer-finding>
 
 Address that finding specifically. If you believe it is mistaken, prove it against the files rather than asserting it.`;
+  }
 
   return `\n${body}\n`;
 }
@@ -394,6 +426,34 @@ function openObjectivePrompt(record, { adopted = false, adoptCommand = null, cle
   return `<${tag}>\n${body.join('\n')}\n</${tag}>`;
 }
 
+/**
+ * A verifier is still measuring, and everything else says the goal is done.
+ *
+ * Holding the close rather than blocking the turn: the probe cannot veto,
+ * because a probe launched this turn has no verdict and every first stop after
+ * an edit would otherwise block. But closing before it reports throws its
+ * answer away, and its answer is the reason it was armed.
+ */
+function probePendingPrompt(goal, { pending, defer, maxDefers, now = Date.now() }) {
+  const names = pending.map((p) => `\`${p.probeId}\``).join(', ');
+  const ages = pending
+    .map((p) => {
+      const started = Date.parse(p.startedAt || '');
+      const seconds = Number.isFinite(started) ? Math.max(0, Math.round((now - started) / 1000)) : null;
+      const budget = p.timeoutMs ? `${Math.round(p.timeoutMs / 1000)}s` : 'no budget';
+      return `  ${p.probeId} — started ${seconds == null ? 'just now' : `${seconds}s ago`}, budget ${budget}`;
+    })
+    .join('\n');
+
+  return `[Bandaid] Holding the close — ${pending.length === 1 ? 'a verifier is' : `${pending.length} verifiers are`} still measuring this worktree.
+
+${ages}
+
+Everything else agrees the objective is met, but ${names} ${pending.length === 1 ? 'has' : 'have'} not reported on the current state of the files. This does **not** count against your continuation budget (hold ${defer} of ${maxDefers}).
+
+Keep working on anything that does not depend on the result, or simply end the turn again in a moment — the next stop reads the verdict. Do not disarm the probe to get past this.`;
+}
+
 /** Adapted from Codex `goals/budget_limit.md`. */
 function budgetLimitPrompt(goal, { completeCommand }) {
   const { budget, used } = formatBudgetLine(goal);
@@ -426,6 +486,7 @@ module.exports = {
   criteriaSection,
   escapeXmlText,
   openObjectivePrompt,
+  probePendingPrompt,
   verificationSection,
   violationPrompt,
 };

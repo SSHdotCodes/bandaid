@@ -94,6 +94,23 @@ const DEFAULTS = {
     blockerLimit: 2,
   },
 
+  // Verification that takes longer than a hook and may decline to answer.
+  // Commands live in the project's committed .bandaid/probes.json, never here:
+  // a command in a per-machine config does not travel with the project, which
+  // is the whole reason the manifest exists.
+  probes: {
+    enabled: true,
+    manifest: '.bandaid/probes.json',
+    // Holds on closing a goal while a probe is still in flight, so a verdict
+    // that arrives a second late is not simply missed.
+    maxDefers: 3,
+    defaultTimeoutMs: 600000,
+    artifactRoot: '.bandaid/artifacts',
+    // Never set this false. It exists so that turning it off is a line in a
+    // diff somebody reviews.
+    requireTrust: true,
+  },
+
   // Nothing here has ever been deleted: one directory per session, forever,
   // and a turns.jsonl that reaches megabytes in a day. A session with an active
   // goal is exempt from all of it — that is the long-horizon case, and losing
@@ -175,6 +192,9 @@ function envOverrides() {
   if (goalsEnabled !== undefined) goals.enabled = goalsEnabled;
   if (process.env.BANDAID_GOAL_MODE) goals.mode = process.env.BANDAID_GOAL_MODE;
   if (process.env.BANDAID_CARRY_OVER) goals.carryOver = process.env.BANDAID_CARRY_OVER;
+  const probesEnabled = bool('BANDAID_PROBES');
+  if (probesEnabled !== undefined) out.probes = { enabled: probesEnabled };
+  if (process.env.BANDAID_PROBE_MANIFEST) out.probes = { ...(out.probes || {}), manifest: process.env.BANDAID_PROBE_MANIFEST };
   const maxCont = int('BANDAID_MAX_CONTINUATIONS');
   if (maxCont !== undefined) goals.maxContinuations = maxCont;
   if (process.env.BANDAID_GOAL_CHECK) goals.check = process.env.BANDAID_GOAL_CHECK;

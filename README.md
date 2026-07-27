@@ -260,6 +260,98 @@ Evidence by criterion: 1 measured · 2 asserted but not measured · 3 no evidenc
 Where the criteria section states the bar, that line reports the score — and a
 criterion nothing measured is not a criterion that passed.
 
+### Probes: verification that takes longer than a hook
+
+A `check` is one shell command, boolean, synchronous, and unable to say "not
+applicable here". That is enough for `npm test` and not enough for the things
+that decide whether multi-day work landed — a browser at four viewport widths, a
+minute of sustained load, a scanner that wants a lockfile this project does not
+have.
+
+**One rule shapes the whole feature: probes veto, they never prove.** A browser
+probe passing does not prove *migrate auth off JWT*; it proves the page renders.
+So a probe can block a stop and feed the judge, and only `check` and `judge` can
+close a goal. Three things fall out of that: a misconfigured probe can never
+close a goal early, which is the expensive error; composition needs no weights,
+because any-veto is the rule `check` already uses; and there is no new autonomy
+tier, because a probe makes the loop safer rather than longer.
+
+A project declares its own, in a committed file:
+
+```json
+// .bandaid/probes.json
+{ "probes": [
+  { "id": "browser", "run": "node .bandaid/probes/browser.js",
+    "when": { "changed": ["src/**/*.tsx", "src/**/*.css"] },
+    "timeoutMs": 60000, "summons": "bandaid-browser-verify" }
+] }
+```
+
+**Exit status is the verdict, and stdout is never read as one:**
+
+| exit | meaning |
+|---|---|
+| `0` | pass |
+| `78` | **abstain** — no tooling, not applicable, nothing to say. Invisible: identical to the probe not existing. |
+| anything else, a timeout, or a signal | fail — vetoes the stop |
+
+The probe owns its own abstain decision; Bandaid never guesses it. A well-formed
+probe opens with `command -v k6 >/dev/null || exit 78`. Silence from a probe that
+*started* is still not evidence, so it fails. `78` rather than `2` because
+`grep` returns 2 on error and plenty of CLIs use it for a usage mistake — a
+probe must not decline by accident.
+
+If the last line of stdout is JSON it becomes detail — a summary for the
+continuation prompt, artifact paths for the ledger — but it can never change the
+verdict. A probe printing `{"ok":true}` and exiting 1 has failed.
+
+**A committed manifest is arbitrary shell execution**, so nothing in it runs
+until its exact contents are approved:
+
+```
+$ bandaid probes trust
+```
+
+Change one byte and it goes back to asking. A world-writable manifest, or one
+owned by another user, is refused whatever its approval state.
+
+**Probes run out of band.** The Stop hook launches them detached and reads a
+cached verdict keyed by a fingerprint of the worktree — HEAD, `git status
+--porcelain -uall`, and the size and mtime of everything dirty or untracked. A
+time-to-live would be wrong in both directions at once; a content fingerprint is
+exact. The continuation loop is already the scheduler, so a ninety-second probe
+only has to survive one continuation.
+
+A probe still measuring cannot veto — every first stop after an edit would
+otherwise block — but it can **hold a close** once, so its answer is not thrown
+away by a goal closing a second early.
+
+### Expectations: predictions, not memories
+
+```
+bandaid goal expect --says "0" -- "grep -c retryLegacy src/client.js"
+```
+
+The model records these *as it works*, and the runtime runs all of them at every
+stop. The value is entirely in the timing: an assertion recorded at the moment of
+an edit is a **prediction**, while the same claim at the end of the turn is a
+**memory** — and memory is exactly what this system distrusts. A model that
+predicts `0`, then measures `3`, has caught itself with no second model in the
+loop and no tokens spent.
+
+It is the cheapest verifier here, and the only one that needs nothing installed.
+
+### Scope: the constraint as a set
+
+```
+bandaid goal scope "src/sync/**" "test/**"
+```
+
+`extractConstraints` is a regex over the objective's prose that both over- and
+under-matches. Declared paths turn *"do NOT touch the billing module"* into
+`baseSha..HEAD` minus a glob list — set membership, not a paragraph asking the
+model to remember. Out-of-scope changes block the stop and are named.
+
 ### Blockers: the difference between "not yet" and "not from here"
 
 A loop that only knows *unfinished* treats "the tests don't pass yet" and "proving
@@ -415,7 +507,8 @@ Bandaid's off and use the native one if you prefer.
 
 The `bandaid` CLI has the same surface plus `install`, `uninstall`, `doctor`,
 `inspect`, `sessions`, `sessions prune`, `prompt`, `goal criteria`, `goal block`,
-`goal adopt`, `goal history`, `evidence show`, `evidence add`, and `on`/`off`.
+`goal adopt`, `goal history`, `goal expect`, `goal scope`, `probes list|trust`,
+`probe status|run|arm|disarm`, `self-check`, `evidence show|add`, and `on`/`off`.
 `goal block <reason>` records one thing this environment cannot do and keeps the
 goal running; `goal blocked` gives up on the whole objective.
 
@@ -550,6 +643,15 @@ the first compaction after install replays prompts from before Bandaid existed.
   two projects, which is usually what you want and occasionally is not. Outside
   git it falls back to the directory, so moving a non-git project loses its
   record.
+- **A probe that abstains looks like verification and provides none.** Four
+  armed probes that all exit 78 leave a goal nobody is watching. `bandaid probe
+  status` and `bandaid verify` both say so; nothing stops you ignoring them.
+- **`when.changed` is globs and nothing more.** No conditions, no expressions. A
+  project that needs logic writes it in the probe script, where it is testable
+  and where the probe can exit 78 for itself.
+- **A detached probe can leak.** A crashed runner leaves a lock and no result,
+  which reads as still-in-flight until the lock ages out. `bandaid probe status`
+  shows it and `bandaid probe clear` removes it.
 - **The ledger's staleness rule is coarse.** Any tracked edit moves the worktree
   fingerprint, so on a busy day most records show as history rather than as
   current proof. That errs in the safe direction — the judge re-reads the files
@@ -567,7 +669,7 @@ the first compaction after install replays prompts from before Bandaid existed.
 ## Development
 
 ```bash
-npm test          # 230 tests, no dependencies, no network
+npm test          # 280 tests, no dependencies, no network
 npm run eval      # measures the judge against fixtures; needs `claude` on PATH
 node bin/bandaid.js doctor
 ```

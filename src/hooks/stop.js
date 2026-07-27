@@ -24,7 +24,7 @@ const ledger = require('../lib/ledger');
 const store = require('../lib/store');
 const verify = require('../lib/verify');
 const { approxTokenCount } = require('../lib/tokens');
-const { budgetLimitPrompt, continuationPrompt, violationPrompt } = require('../lib/prompts');
+const { budgetLimitPrompt, continuationPrompt, probePendingPrompt, violationPrompt } = require('../lib/prompts');
 const { emitBlocking, runHook } = require('../lib/hookio');
 
 /**
@@ -114,6 +114,27 @@ runHook('Stop', ({ input, config }) => {
   // Proof outranks the model in the generous direction too: a goal whose check
   // passes is finished whether or not the model got around to saying so.
   if (assessment.proven) {
+    // Unless something is still measuring. A probe launched this turn has no
+    // verdict yet; it cannot veto, or every first stop after an edit would
+    // block — but letting the goal close before it reports would throw the
+    // answer away. So the close is held, once, and not at the cost of a
+    // continuation.
+    const pending = (assessment.probes && assessment.probes.pending) || [];
+    const maxDefers = (config.probes || {}).maxDefers ?? 3;
+    const defers = decision.goal.defers || 0;
+
+    if (pending.length && defers < maxDefers) {
+      goals.saveGoal(sessionId, { ...decision.goal, defers: defers + 1, tokensUsed });
+      emitBlocking(
+        probePendingPrompt(decision.goal, {
+          pending,
+          defer: defers + 1,
+          maxDefers,
+        }),
+      );
+      return 2;
+    }
+
     goals.saveGoal(sessionId, {
       ...decision.goal,
       status: 'complete',

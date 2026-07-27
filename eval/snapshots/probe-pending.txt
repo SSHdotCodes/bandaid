@@ -1,0 +1,7 @@
+[Bandaid] Holding the close — a verifier is still measuring this worktree.
+
+  browser — started 34s ago, budget 60s
+
+Everything else agrees the objective is met, but `browser` has not reported on the current state of the files. This does **not** count against your continuation budget (hold 1 of 3).
+
+Keep working on anything that does not depend on the result, or simply end the turn again in a moment — the next stop reads the verdict. Do not disarm the probe to get past this.

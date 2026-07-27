@@ -53,7 +53,7 @@ runHook('UserPromptSubmit', ({ input, config }) => {
     // long session does not inherit an exhausted counter.
     const existing = goals.loadGoal(sessionId);
     if (existing && existing.status === 'active') {
-      goals.saveGoal(sessionId, { ...existing, continuations: 0 });
+      goals.saveGoal(sessionId, { ...existing, continuations: 0, defers: 0 });
     }
   }
 

@@ -15,6 +15,7 @@ const {
   budgetLimitPrompt,
   continuationPrompt,
   openObjectivePrompt,
+  probePendingPrompt,
   violationPrompt,
 } = require('../src/lib/prompts');
 
@@ -160,6 +161,37 @@ describe('prompt snapshots', () => {
         criteria: withCriteria.criteria,
         ledger: LEDGER,
         evidence: '--- turn 1 — 1 tool call ---\n  1. Edit\n     args: src/client.js',
+      }),
+    );
+  });
+
+  it('continuation — a probe vetoed', () => {
+    const verification = { source: 'probe', probeId: 'browser', ok: false, output: '  browser: 3 of 4 viewports clean; 375px overflows by 12px' };
+    matchesSnapshot('continuation-probe-failed', continuationPrompt(withCriteria, { ...opts, verification }));
+  });
+
+  it('continuation — a prediction stopped holding', () => {
+    const verification = {
+      source: 'expect',
+      ok: false,
+      output: '  `grep -c retryLegacy src/client.js` says "0"\n    but: 3',
+    };
+    matchesSnapshot('continuation-expect-failed', continuationPrompt(withCriteria, { ...opts, verification }));
+  });
+
+  it('continuation — the work went outside its declared scope', () => {
+    const verification = { source: 'scope', ok: false, output: '  billing/index.js\n  vendor/parser.js' };
+    matchesSnapshot('continuation-scope-failed', continuationPrompt(withCriteria, { ...opts, verification }));
+  });
+
+  it('probe pending — holding the close while something is still measuring', () => {
+    matchesSnapshot(
+      'probe-pending',
+      probePendingPrompt(withCriteria, {
+        pending: [{ probeId: 'browser', startedAt: '2026-07-27T00:00:00.000Z', timeoutMs: 60000 }],
+        defer: 1,
+        maxDefers: 3,
+        now: Date.parse('2026-07-27T00:00:34.000Z'),
       }),
     );
   });

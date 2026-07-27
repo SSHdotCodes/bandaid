@@ -4,6 +4,12 @@ const { spawnSync } = require('node:child_process');
 
 const { groupBatchesByTurn, renderTurnDigest } = require('./digest');
 
+// Lazily required: `verify` is loaded by the stop decision path, and neither of
+// these has anything to say until a goal actually carries expectations, a
+// scope, or a project with a manifest.
+const selfcheck = () => require('./selfcheck');
+const probesModule = () => require('./probes');
+
 /**
  * Verification tiers above the continuation audit.
  *
@@ -277,6 +283,74 @@ function assess({ goal, config, cwd, turns = [], spawn = {}, record = false } = 
     });
   }
 
+  // The model's own predictions, made while the work happened rather than
+  // recalled at the end of it. Cheapest verifier here: no model, no subprocess
+  // beyond the commands it was told to run.
+  const expectations = (spawn.runExpectations || selfcheck().runExpectations)(goal, { cwd });
+  if (expectations.verdict === 'fail') {
+    const rendered = selfcheck().renderFailures(expectations.failures);
+    ledger.record({
+      kind: 'expect',
+      claim: `${expectations.failures.length} of ${expectations.checked} recorded expectation(s) did not hold`,
+      verdict: 'refuted',
+      detail: rendered,
+    });
+    return {
+      proven: false,
+      reason: `expectation failed: ${expectations.failures[0].expected}`,
+      verification: { source: 'expect', ok: false, output: rendered },
+    };
+  }
+
+  // Paths this goal said it would not touch, and did.
+  const scope = (spawn.checkScope || selfcheck().checkScope)(goal, { cwd });
+  if (scope.verdict === 'fail') {
+    const rendered = scope.violations.map((f) => `  ${f}`).join('\n');
+    ledger.record({
+      kind: 'expect',
+      claim: `${scope.violations.length} file(s) changed outside the declared scope`,
+      verdict: 'refuted',
+      detail: rendered,
+    });
+    return {
+      proven: false,
+      reason: `changed outside the declared scope: ${scope.violations.slice(0, 3).join(', ')}`,
+      verification: { source: 'scope', ok: false, output: rendered },
+    };
+  }
+
+  // Probes veto but never prove, so a failing one blocks and a passing one is
+  // simply not an argument for closing the goal.
+  const probeResult = (spawn.assessProbes || probesModule().assessProbes)({ goal, config, cwd });
+  if (probeResult.verdict === 'fail') {
+    const first = probeResult.failures[0];
+    const rendered = probeResult.failures
+      .map((f) => `  ${f.probeId}: ${f.summary || `exited ${f.exitCode}`}`)
+      .join('\n');
+    ledger.record({
+      kind: 'probe',
+      claim: `probe \`${first.probeId}\` failed: ${first.summary || `exit ${first.exitCode}`}`,
+      pointers: (first.artifacts || []).map((a) => `artifact:${a}`),
+      verdict: 'refuted',
+      detail: rendered,
+    });
+    return {
+      proven: false,
+      reason: `probe failed: ${first.probeId} — ${first.summary || `exit ${first.exitCode}`}`,
+      verification: { source: 'probe', probeId: first.probeId, ok: false, output: rendered },
+      probes: probeResult,
+    };
+  }
+
+  for (const passed of probeResult.passed || []) {
+    ledger.record({
+      kind: 'probe',
+      claim: `probe \`${passed.probeId}\` passed${passed.summary ? `: ${passed.summary}` : ''}`,
+      pointers: (passed.artifacts || []).map((a) => `artifact:${a}`),
+      verdict: 'supported',
+    });
+  }
+
   if (judgeEnabled) {
     const verdict = (spawn.runJudge || runJudge)({
       objective: goal.objective,
@@ -317,10 +391,11 @@ function assess({ goal, config, cwd, turns = [], spawn = {}, record = false } = 
       proven: true,
       reason: `check passed: ${command}`,
       verification: { source: 'check', command, ok: true, output: check.output },
+      probes: probeResult,
     };
   }
 
-  return { proven: false, reason: null, verification: null };
+  return { proven: false, reason: null, verification: null, probes: probeResult };
 }
 
 module.exports = {
