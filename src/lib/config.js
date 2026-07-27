@@ -70,6 +70,10 @@ const DEFAULTS = {
     // goal is allowed to close. Costs a subprocess and a few seconds per stop.
     judge: false,
     judgeModel: 'haiku',
+    // The binary to run the judge with. Overridable so a session whose Claude
+    // Code lives under another name can still verify — and so the end-to-end
+    // tests can drive a verdict without a network round trip.
+    judgeCli: 'claude',
 
     // Ceiling for one check command or one judge run.
     verifyTimeoutMs: 120000,
@@ -78,6 +82,12 @@ const DEFAULTS = {
     // Guards the case neither Codex nor Claude Code detects: real-looking work
     // every turn that never moves the failure.
     plateauLimit: 2,
+
+    // Blockers the model may record before Bandaid stops continuing the goal.
+    // Separate from plateauLimit because it catches the opposite failure: not
+    // work that keeps failing the same way, but work this environment cannot do
+    // at all, which no number of further turns changes.
+    blockerLimit: 2,
   },
 
   debug: false,
@@ -152,6 +162,7 @@ function envOverrides() {
   const judge = bool('BANDAID_JUDGE');
   if (judge !== undefined) goals.judge = judge;
   if (process.env.BANDAID_JUDGE_MODEL) goals.judgeModel = process.env.BANDAID_JUDGE_MODEL;
+  if (process.env.BANDAID_JUDGE_CLI) goals.judgeCli = process.env.BANDAID_JUDGE_CLI;
   if (Object.keys(goals).length) out.goals = goals;
 
   return out;

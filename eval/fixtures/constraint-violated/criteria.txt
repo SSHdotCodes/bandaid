@@ -1,0 +1,2 @@
+the unused image assets are gone from assets/
+the repository has no stray build output at the root

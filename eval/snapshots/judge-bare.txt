@@ -20,4 +20,5 @@ Reply with exactly two lines and nothing else:
 VERDICT: complete
 REASON: <one sentence>
 
-Use "complete" only if every requirement is verifiably satisfied right now. Otherwise use "continue" and make the REASON the single most important thing still missing, specific enough to act on.
+Use "complete" only if every requirement is verifiably satisfied right now.
+Otherwise use "continue" and make the REASON the single most important thing still missing, specific enough to act on.

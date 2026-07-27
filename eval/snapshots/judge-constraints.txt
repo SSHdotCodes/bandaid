@@ -1,7 +1,7 @@
 You are auditing whether an engineer's work actually satisfies an objective. You did not do the work and you have no stake in it being finished.
 
 <objective>
-Port the retry logic to the new client
+Port the retry logic to the new client without touching the billing module
 </objective>
 
 The acceptance criteria, fixed when the goal was set. Judge against these and only these:
@@ -11,6 +11,18 @@ The acceptance criteria, fixed when the goal was set. Judge against these and on
 2. src/client.js no longer references retryLegacy
 3. the backoff delays actually grow
 </acceptance-criteria>
+Constraints from the same objective. These are vetoes: work that satisfies every criterion while breaking one of these has failed, not partly succeeded.
+
+<constraints>
+- do NOT touch the billing module
+</constraints>
+
+Check each constraint against the repository as actively as you check the criteria. Go and look at what it names. A constraint protecting something is broken when that thing is missing, emptied, or rewritten — and something that was deleted leaves no trace of itself, so look for what still references it: manifests, lockfiles, imports, config, and documentation that point at a path nothing is at any more.
+Recorded as blocked by the environment — hardware, services, credentials, or interactions this session does not have. Do not count these against completion, and do not ask for them:
+
+<recorded-blockers>
+- confirming the retry timing needs a live upstream this session cannot reach
+</recorded-blockers>
 The engineer's tool log for this objective, which may be incomplete or self-flattering:
 
 <evidence>
@@ -18,11 +30,6 @@ The engineer's tool log for this objective, which may be incomplete or self-flat
   1. Edit
      args: src/client.js
 </evidence>
-A verification command was run and passed. Its output:
-
-<check-output>
-ok 12 passing
-</check-output>
 
 Verify against the repository itself. Read the files, grep for the symbols, and confirm each requirement in the objective is really satisfied in the current state of the code. The log above is a claim, not proof — check it. Absence of obvious remaining work is not proof either; the objective must be positively satisfied.
 
@@ -33,4 +40,5 @@ VERDICT: complete
 REASON: <one sentence>
 
 Use "complete" only if every requirement is verifiably satisfied right now.
+Use "violated" if the current state of the repository breaks one of the constraints above, and name which one in the REASON. Prefer "violated" over "continue" when both apply: unfinished work earns another attempt, a broken constraint does not.
 Otherwise use "continue" and make the REASON the single most important thing still missing, specific enough to act on.

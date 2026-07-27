@@ -1,0 +1,1 @@
+Add a --json flag to the report command, cover it with a unit test, and confirm the rendered output on the physical label printer.

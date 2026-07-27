@@ -5,8 +5,10 @@ const { describe, it } = require('node:test');
 
 const { DEFAULTS } = require('../src/lib/config');
 const {
+  blockedOut,
   decideOnStop,
   endsWithQuestionToUser,
+  extractConstraints,
   isGoalWorthy,
   newGoal,
   resolveMaxContinuations,
@@ -186,5 +188,58 @@ describe('autonomy slider', () => {
     });
     assert.equal(decision.action, 'continue', 'a checked goal should still have room at 3 continuations');
     assert.match(decision.reason, /4\/8/);
+  });
+});
+
+describe('constraints', () => {
+  it('pulls the negative half out of an objective', () => {
+    const constraints = extractConstraints(
+      'Migrate auth off JWT — do NOT touch the billing module, it ships Friday',
+    );
+    assert.deepEqual(constraints, ['do NOT touch the billing module']);
+  });
+
+  it('catches the phrasing that reads as a scope limit rather than a prohibition', () => {
+    // The shape that cost a real session four consecutive stops: the constraint
+    // rides along on the end of the thing being asked for. The whole clause is
+    // kept rather than split at "and" — "do not touch billing and payments"
+    // must not become a licence to touch payments.
+    const constraints = extractConstraints('remove the unused assets and tidy the repo without touching generated output');
+    assert.deepEqual(constraints, ['remove the unused assets and tidy the repo without touching generated output']);
+  });
+
+  it('finds nothing in a purely additive objective', () => {
+    assert.deepEqual(extractConstraints('Port the retry logic to the new client and cover it with tests'), []);
+  });
+
+  it('is recorded on the goal at creation', () => {
+    const goal = newGoal('Rewrite the parser. Never edit anything under vendor/.');
+    assert.deepEqual(goal.constraints, ['Never edit anything under vendor/']);
+  });
+});
+
+describe('blockers', () => {
+  const withGoals = (patch) => ({ ...DEFAULTS, goals: { ...DEFAULTS.goals, ...patch } });
+
+  it('does not fire before the limit', () => {
+    assert.equal(blockedOut({ blockedStreak: 0 }, DEFAULTS), false);
+    assert.equal(blockedOut({ blockedStreak: 1 }, DEFAULTS), false);
+  });
+
+  it('fires once enough of the objective is walled off', () => {
+    assert.equal(blockedOut({ blockedStreak: 2 }, DEFAULTS), true);
+    assert.equal(blockedOut({ blockedStreak: 9 }, DEFAULTS), true);
+  });
+
+  it('honours a configured limit, including disabling the exit entirely', () => {
+    assert.equal(blockedOut({ blockedStreak: 2 }, withGoals({ blockerLimit: 4 })), false);
+    assert.equal(blockedOut({ blockedStreak: 4 }, withGoals({ blockerLimit: 4 })), true);
+    assert.equal(blockedOut({ blockedStreak: 99 }, withGoals({ blockerLimit: 0 })), false);
+  });
+
+  it('starts empty on a new goal', () => {
+    const goal = newGoal('Ship the migration');
+    assert.deepEqual(goal.blockers, []);
+    assert.equal(goal.blockedStreak, 0);
   });
 });

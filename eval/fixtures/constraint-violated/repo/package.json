@@ -1,0 +1,12 @@
+{
+  "name": "reportkit",
+  "version": "1.4.0",
+  "private": true,
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js"
+  },
+  "comments": {
+    "vendor": "vendor/ holds pinned third-party sources that are not on the registry. Do not regenerate or remove them; there is no way to reinstall them."
+  }
+}

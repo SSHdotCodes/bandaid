@@ -1,0 +1,7 @@
+{
+  "note": "Pinned third-party sources. These are not published to any registry; this directory is the only copy. Regenerating it is not possible.",
+  "files": [
+    { "path": "vendor/parser.js", "version": "0.9.3", "sha256": "8f14e45fceea167a5a36dedd4bea2543b0e2e0f6cbb1cdd7f1b19b2f2f2e1a11" },
+    { "path": "vendor/lexer.js", "version": "0.9.3", "sha256": "c9f0f895fb98ab9159f51fd0297e236d0e2e0f6cbb1cdd7f1b19b2f2f2e1a22" }
+  ]
+}

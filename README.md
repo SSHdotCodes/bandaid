@@ -121,7 +121,7 @@ Codex's `goals/continuation.md`, including the parts that matter most:
 When the audit passes, the model closes the goal itself by running
 `bandaid goal complete`, and Bandaid stops asking.
 
-**It is bounded in five independent ways**, because a stop hook that can loop is
+**It is bounded in six independent ways**, because a stop hook that can loop is
 worse than no stop hook:
 
 - `stop_hook_active` is honoured — Claude Code's own loop guard always wins.
@@ -129,6 +129,7 @@ worse than no stop hook:
 - Turns that changed nothing (no `Edit`/`Write`/`Bash`/`Task`) are never audited.
 - If Claude ended its turn asking *you* a question, the stop is always allowed.
 - Two identical verification failures in a row end the loop early (see below).
+- Work this environment cannot do stops being asked for (see below).
 
 Worst case is two extra rounds on a goal the model cannot finish. Set
 `goals.mode` to `"explicit"` if you only want `/bandaid:goal` to arm it, or
@@ -175,6 +176,70 @@ judge as its rubric, and carried through compaction alongside the objective. The
 completion audit grades them one at a time instead of re-deriving requirements.
 They cannot be quietly rewritten later — `bandaid goal criteria` refuses to move
 a bar that is already fixed unless you pass `--replace`.
+
+### Blockers: the difference between "not yet" and "not from here"
+
+A loop that only knows *unfinished* treats "the tests don't pass yet" and "proving
+this needs a GPU that isn't in this machine" as the same state, and hands both back
+for another attempt. The second one is unwinnable at the moment it starts, and it
+stays unwinnable for every remaining turn in the budget.
+
+That is not hypothetical. Across ~190 real Claude Code sessions from one project —
+using the *native* `/goal`, not Bandaid — roughly a third of the goal-condition stop
+blocks name a blocker no amount of model effort clears: hardware that is absent, a
+service that isn't running, a browser interaction that can't be driven headlessly, a
+data source that doesn't exist. (Roughly, because deciding what counts is a reading
+of prose, not a crisp count.) They cluster at the **end** of the longest loops.
+
+The one that is exact, because it is a single measurable session: a goal blocked
+**seven times over 80 minutes**, across 651 assistant messages and **589,414 output
+tokens**, whose last three blocks were restatements of "I can't do this headlessly."
+
+So the model can record it, once:
+
+```bash
+bandaid goal block "confirming the fix needs a GPU this session cannot reach"
+```
+
+That does **not** close the goal — the rest of the objective is still worth working.
+It does three things: the blocker is re-injected every turn marked *accepted, do not
+re-argue*, it is handed to the judge as something not to count against completion,
+and after `blockerLimit` of them (default 2) Bandaid stops continuing the goal and
+lets you unblock it.
+
+Recording a blocker is not an escape hatch from hard work. A failing check outranks
+it — while a check command is red, that is unfinished work with a blocker attached,
+not a blocked goal — and the continuation prompt says plainly that difficulty,
+length, and a failing test are not blockers.
+
+The old prompt had this exit, and gated it behind *"the same blocker has now
+repeated across turns"*: the model was told to loop at least twice before it was
+allowed to say it was stuck. That sentence is gone.
+
+### Constraints: the half of the objective the audit wasn't grading
+
+"Migrate auth off JWT — do NOT touch the billing module" carries two requirements
+and only one of them is a thing to build. A completion audit grades what was built,
+so the second one quietly stops being graded at all: every criterion can be
+satisfied by work that also broke the one thing you said to leave alone, and the
+audit reads that as success.
+
+Bandaid pulls the negative clauses out of the objective when the goal is set, stores
+them beside the criteria, and gives them to the judge as **vetoes** — with an
+instruction to go looking for the state they forbid, since a deleted thing leaves no
+trace of itself except the manifests and imports still pointing at it.
+
+A broken constraint gets its own verdict, because it needs the opposite response
+from an unmet criterion. Unmet means keep working. Broken means **stop**: the damage
+is in the worktree already, another attempt cannot undo it, and a model choosing its
+own remedy is how a bad delete becomes a bad delete plus an improvised restore. So
+Bandaid closes the goal, blocks exactly once, and spends that turn making the model
+tell you what it broke and what recovery would take.
+
+The same corpus has this one too: a goal carrying "…without touching things that are
+used", a directory deleted that the user had explicitly said not to touch, and the
+judge correctly catching it — then blocking the stop **four times in thirty
+seconds**, asking for another attempt at something no attempt could fix.
 
 ### Verification: the part Codex does not have
 
@@ -266,7 +331,9 @@ Bandaid's off and use the native one if you prefer.
 | `/bandaid:verify` | Run the check and the judge now, and show the verdict |
 
 The `bandaid` CLI has the same surface plus `install`, `uninstall`, `doctor`,
-`inspect`, `sessions`, `prompt`, `goal criteria`, and `on`/`off`.
+`inspect`, `sessions`, `prompt`, `goal criteria`, `goal block`, and `on`/`off`.
+`goal block <reason>` records one thing this environment cannot do and keeps the
+goal running; `goal blocked` gives up on the whole objective.
 
 ---
 
@@ -294,8 +361,10 @@ The `bandaid` CLI has the same surface plus `install`, `uninstall`, `doctor`,
     "check": null,                  // shell command; exit 0 closes any goal
     "judge": false,                 // independent read-only verifier
     "judgeModel": "haiku",
+    "judgeCli": "claude",           // binary the judge runs as
     "verifyTimeoutMs": 120000,      // ceiling for one check or one judge run
-    "plateauLimit": 2               // identical failures before giving up
+    "plateauLimit": 2,              // identical failures before giving up
+    "blockerLimit": 2               // recorded blockers before giving up
   }
 }
 ```
@@ -345,10 +414,40 @@ the first compaction after install replays prompts from before Bandaid existed.
   pass, not that the objective was met; that gap is what the judge is for, and
   the judge is a model too. Neither tier turns a vague objective into a
   verifiable one.
-- **The judge costs a subprocess and a few seconds** (~9s with Haiku) on stops
+- **The plateau breaker almost never fires.** It compares verification failures
+  for byte-equality after folding whitespace and case, which catches a check
+  command printing the same output twice and essentially nothing else. Replayed
+  against two real stuck loops of 7 and 4 consecutive blocks — 9 consecutive
+  pairs, every one of them a judge repeating itself in substance — **not one pair
+  was byte-identical, so it would have fired zero times.** A judge writes fresh
+  prose each round; token overlap between consecutive reasons sat around 0.2–0.7
+  depending on how much of the reason you compare, so there is no threshold that
+  separates "stuck" from "progressing" either. That is why this is documented
+  rather than replaced with a similarity metric. Blockers are what actually ends
+  a stuck loop early; the plateau breaker is a cheap backstop for the
+  check-command case, where the same output really does repeat verbatim.
+- **Constraint extraction is a regex over the objective's clauses.** It finds
+  `do not`, `never`, `avoid`, `must not`, `without touching`, and friends. Phrase
+  a constraint some other way and it is not extracted, and nothing tells you so —
+  `bandaid goal show` lists what was found, which is the only way to check.
+- **The `violated` verdict is the least reliable tier.** Over 8 runs against the
+  `constraint-violated` fixture with Haiku it landed 6 times; the misses were the
+  judge asserting the constraint was intact without going to look. A missed
+  violation degrades to ordinary "continue", so the cost is the old behaviour, not
+  a wrong stop. A stronger `judgeModel` is the lever if this matters to you.
+- **The judge costs a subprocess and 12–16s** (measured over three Haiku runs
+  against `eval/fixtures/done`: 12.4s, 13.8s, 15.7s) on stops
   that would otherwise be blocked, and needs `claude` on `PATH`. It is off by
   default for that reason. If it cannot run it abstains silently rather than
   blocking.
+- **Two sessions in one directory confuse the CLI.** The hooks are fine — they
+  always get a `session_id` from Claude Code and each session's ledger and goal
+  stay separate on disk. But `bandaid` invoked without `--session` resolves the
+  session through a single per-directory pointer (`current/<sha256(cwd)>.json`)
+  that both sessions overwrite, so the last one to submit a prompt wins. The
+  slash commands do not pass `--session`, which means `/bandaid:goal-done` in
+  one session can close the other's goal. Pass `--session <id>` explicitly, or
+  keep one session per directory, until the pointer is per-session.
 - **Tested against Claude Code 2.1.220.** Hook input field names are product
   internals and could change; `bandaid doctor` and the end-to-end tests are how
   you find out.
@@ -358,7 +457,7 @@ the first compaction after install replays prompts from before Bandaid existed.
 ## Development
 
 ```bash
-npm test          # 125 tests, no dependencies, no network
+npm test          # 145 tests, no dependencies, no network
 npm run eval      # measures the judge against fixtures; needs `claude` on PATH
 node bin/bandaid.js doctor
 ```
@@ -385,20 +484,30 @@ that matters — work that *looks* finished:
 | `not-implemented` | continue — the symbol exists, the body throws |
 | `missing-test` | continue — two of three criteria met |
 | `check-fails` | continue — code looks right, the check exits non-zero |
+| `blocked-by-environment` | complete — one criterion needs absent hardware and is recorded as blocked |
+| `constraint-violated` | violated — the cleanup is correct, but a protected directory was emptied |
 
 ```
-$ npm run eval -- --repeat 3
-  accuracy   15/15 (100%)
-  confusion  complete-when-complete 3   complete-when-not 0
-             continue-when-not      12   continue-when-complete 0
+$ npm run eval -- --repeat 2
+  accuracy   14/14 (100%)
+  confusion  complete-when-complete 4   complete-when-not 0
+             continue-when-not      10   continue-when-complete 0
   precision  100%  (of the goals it closed, how many were really done)
   recall     100%  (of the goals really done, how many it closed)
 ```
 
-That is five fixtures on one theme with Haiku and criteria supplied — a floor,
+That is seven fixtures on one theme with Haiku and criteria supplied — a floor,
 not a general claim about the judge. What it buys is a regression detector: the
 number moves when a prompt or a tier changes, which nothing here could tell you
-before.
+before. `constraint-violated` is the one that is genuinely flaky (6 of 8 across
+runs); the others have not missed.
+
+The last two fixtures exist because the mechanisms they cover are prompt-shaped,
+and a test that only asserts the prompt contains the right paragraph proves the
+paragraph, not the behaviour. `blocked-by-environment` is the one that showed the
+blocker path works end to end: the judge closed the goal and said, unprompted,
+that the printer confirmation "is a recorded blocker not counted toward
+completion."
 
 ---
 

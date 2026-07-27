@@ -248,6 +248,76 @@ describe('verification gate', () => {
     assert.equal(goal.status, 'budget_limited');
   });
 
+  it('stops continuing a goal the environment has walled off', () => {
+    const session = 'e2e-session-blocked';
+    armGoal(session, 'Confirm the render fix on real hardware and update the docs');
+
+    assert.equal(runHook('stop.js', { session_id: session, cwd: ROOT }).code, 2, 'blocks while nothing is blocked');
+
+    cli(['goal', 'block', '--session', session, 'confirming the render fix needs a GPU this session has no access to']);
+    cli(['goal', 'block', '--session', session, 'the second half needs a live service that is not running']);
+
+    // The saving: this stop is allowed through with continuations still on the
+    // clock, rather than spending every one of them re-asking for hardware.
+    const result = runHook('stop.js', { session_id: session, cwd: ROOT });
+    assert.equal(result.code, 0, 'another turn cannot supply hardware that is absent');
+
+    const goal = JSON.parse(fs.readFileSync(path.join(HOME, 'sessions', session, 'goal.json'), 'utf8'));
+    assert.equal(goal.status, 'blocked');
+    assert.equal(goal.blockers.length, 2);
+  });
+
+  it('re-injects recorded blockers so the next turn stops re-attempting them', () => {
+    const session = 'e2e-session-blocker-echo';
+    armGoal(session, 'Verify the overlay renders and cover it with tests');
+
+    cli(['goal', 'block', '--session', session, 'driving the overlay needs a browser this session cannot open']);
+    const result = runHook('stop.js', { session_id: session, cwd: ROOT });
+    assert.equal(result.code, 2);
+    assert.ok(result.stderr.includes('needs a browser this session cannot open'), 'the blocker comes back with the goal');
+    assert.ok(result.stderr.includes('do not re-argue them'), 'and it comes back as settled, not as an open question');
+  });
+
+  it('a failing check outranks a blocker, because a failing test is not a missing GPU', () => {
+    const session = 'e2e-session-blocked-but-failing';
+    const failing = { BANDAID_GOAL_CHECK: 'echo "FAIL src/render.test.ts:12"; exit 1' };
+    armGoal(session, 'Make the render suite pass on the current hardware', failing);
+
+    cli(['goal', 'block', '--session', session, 'first blocker']);
+    cli(['goal', 'block', '--session', session, 'second blocker']);
+
+    const result = runHook('stop.js', { session_id: session, cwd: ROOT }, failing);
+    assert.equal(result.code, 2, 'ground truth still outranks the model on what it cannot do');
+    assert.ok(result.stderr.includes('FAIL src/render.test.ts:12'));
+  });
+
+  it('a violated constraint ends the goal instead of extending it', () => {
+    const session = 'e2e-session-violated';
+    // A stub standing in for the judge, so the verdict is driven rather than
+    // fetched. What is under test is what the Stop hook does with it.
+    const stub = path.join(HOME, 'judge-violated.sh');
+    fs.writeFileSync(
+      stub,
+      '#!/bin/sh\necho "VERDICT: violated"\necho "REASON: vendor/ was deleted, which the objective said to leave alone"\n',
+    );
+    fs.chmodSync(stub, 0o755);
+    const judging = { BANDAID_JUDGE: '1', BANDAID_JUDGE_CLI: stub };
+
+    armGoal(session, 'Tidy the repository without touching vendor/', judging);
+
+    const first = runHook('stop.js', { session_id: session, cwd: ROOT }, judging);
+    assert.equal(first.code, 2, 'the user is told once');
+    assert.ok(first.stderr.includes('vendor/ was deleted'), 'and told what was violated');
+    assert.ok(first.stderr.includes('Do not attempt the recovery'), 'without improvising a remedy');
+
+    const goal = JSON.parse(fs.readFileSync(path.join(HOME, 'sessions', session, 'goal.json'), 'utf8'));
+    assert.equal(goal.status, 'blocked', 'a violation is terminal — no further attempt can undo it');
+    assert.deepEqual(goal.constraints, ['Tidy the repository without touching vendor/']);
+
+    const second = runHook('stop.js', { session_id: session, cwd: ROOT }, judging);
+    assert.equal(second.code, 0, 'and it never blocks twice');
+  });
+
   it('a check that cannot run is treated as unproven, never as proof', () => {
     const session = 'e2e-session-badcheck';
     armGoal(session, 'Ship the parser rewrite with tests');

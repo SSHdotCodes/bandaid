@@ -1,0 +1,3 @@
+src/report.js accepts a --json flag and emits valid JSON
+test/report.test.js asserts the JSON shape
+the rendered output is confirmed on the label printer

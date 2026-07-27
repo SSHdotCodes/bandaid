@@ -5,7 +5,7 @@ const { describe, it } = require('node:test');
 
 const { DEFAULTS } = require('../src/lib/config');
 const { newGoal, plateauReached, recordReason } = require('../src/lib/goals');
-const { assess, evidenceFromTurns, parseVerdict, runCheck } = require('../src/lib/verify');
+const { assess, evidenceFromTurns, judgePrompt, parseVerdict, runCheck } = require('../src/lib/verify');
 
 const withGoals = (patch) => ({ ...DEFAULTS, goals: { ...DEFAULTS.goals, ...patch } });
 
@@ -199,5 +199,59 @@ describe('plateau detection', () => {
   it('does not trip on an unverified goal', () => {
     const goal = recordReason(newGoal('Ship it'), null);
     assert.equal(plateauReached(goal, DEFAULTS), false, 'no verification means no plateau signal');
+  });
+});
+
+describe('violated verdict', () => {
+  it('is accepted by the two-line contract', () => {
+    const parsed = parseVerdict('VERDICT: violated\nREASON: vendor/ was deleted, which the objective said to leave alone');
+    assert.equal(parsed.verdict, 'violated');
+    assert.match(parsed.reason, /vendor\//);
+  });
+
+  it('surfaces through assess as neither proven nor merely unfinished', () => {
+    const goal = { ...newGoal('Tidy the repo without touching vendor/'), criteria: [] };
+    const result = assess({
+      goal,
+      config: withGoals({ judge: true }),
+      turns: [],
+      spawn: {
+        runJudge: () => ({ verdict: 'violated', reason: 'vendor/ has been deleted' }),
+      },
+    });
+    assert.equal(result.proven, false);
+    assert.equal(result.violated, true, 'a broken constraint must not be handed back as ordinary unfinished work');
+    assert.match(result.reason, /vendor\//);
+  });
+
+  it('leaves an ordinary continue untouched', () => {
+    const result = assess({
+      goal: newGoal('Ship the migration'),
+      config: withGoals({ judge: true }),
+      turns: [],
+      spawn: { runJudge: () => ({ verdict: 'continue', reason: 'src/legacy.ts is unmigrated' }) },
+    });
+    assert.equal(result.violated, false);
+  });
+});
+
+describe('judgePrompt', () => {
+  it('hands the judge the constraints as vetoes and the blockers as settled', () => {
+    const prompt = judgePrompt({
+      objective: 'Tidy the repo',
+      evidence: '',
+      checkOutput: null,
+      constraints: ['do not touch vendor/'],
+      blockers: ['confirming the fix needs a GPU this machine does not have'],
+    });
+    assert.match(prompt, /do not touch vendor\//);
+    assert.match(prompt, /needs a GPU this machine does not have/);
+    assert.match(prompt, /Use "violated"/, 'the third verdict is only offered when there is something to violate');
+    assert.match(prompt, /Do not count these against completion/);
+  });
+
+  it('does not offer the violated verdict when the objective has no constraints', () => {
+    const prompt = judgePrompt({ objective: 'Ship it', evidence: '', checkOutput: null });
+    assert.doesNotMatch(prompt, /Use "violated"/);
   });
 });

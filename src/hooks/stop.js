@@ -24,7 +24,7 @@ const ledger = require('../lib/ledger');
 const store = require('../lib/store');
 const verify = require('../lib/verify');
 const { approxTokenCount } = require('../lib/tokens');
-const { budgetLimitPrompt, continuationPrompt } = require('../lib/prompts');
+const { budgetLimitPrompt, continuationPrompt, violationPrompt } = require('../lib/prompts');
 const { emitBlocking, runHook } = require('../lib/hookio');
 
 /** Turns recorded since the goal was set — the work the goal is accountable for. */
@@ -99,6 +99,32 @@ runHook('Stop', ({ input, config }) => {
     return 0;
   }
 
+  // A constraint in the objective has already been broken. Another turn cannot
+  // make that untrue, so this is the last time the goal blocks — and it spends
+  // that block telling the user rather than asking for a fix.
+  if (assessment.violated) {
+    goals.saveGoal(sessionId, {
+      ...decision.goal,
+      status: 'blocked',
+      tokensUsed,
+      note: assessment.reason,
+    });
+    emitBlocking(violationPrompt(decision.goal, { finding: assessment.reason }));
+    return 2;
+  }
+
+  // Enough of the objective is walled off by this environment that another
+  // continuation is a bad bet. Ground truth still outranks the model's own
+  // account of what it cannot do: while a configured check is failing, that is
+  // unfinished work with a blocker attached, not a blocked goal.
+  const checkFailing = Boolean(
+    assessment.verification && assessment.verification.source === 'check' && !assessment.verification.ok,
+  );
+  if (!checkFailing && goals.blockedOut(decision.goal, config)) {
+    goals.saveGoal(sessionId, { ...decision.goal, status: 'blocked', tokensUsed });
+    return 0;
+  }
+
   const scored = goals.recordReason(decision.goal, assessment.reason);
 
   // Same verification failure twice running means the loop has stopped
@@ -119,6 +145,7 @@ runHook('Stop', ({ input, config }) => {
     continuationPrompt(updated, {
       completeCommand: cmd,
       criteriaCommand: goals.criteriaCommand(sessionId),
+      blockCommand: goals.blockCommand(sessionId),
       verification: assessment.verification,
       checkCommand: updated.check ?? (config.goals || {}).check ?? null,
     }),

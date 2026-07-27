@@ -2,6 +2,7 @@
 
 const path = require('node:path');
 
+const { looksLikeCorrection } = require('./restore');
 const store = require('./store');
 
 /**
@@ -43,6 +44,19 @@ const TERMINAL_STATUSES = new Set(['complete', 'blocked', 'budget_limited', 'aba
  */
 const DEFAULT_CONTINUATIONS = { verified: 8, judged: 4, unverified: 2 };
 
+/**
+ * How many distinct blockers the model may record before the goal stops being
+ * worth another continuation.
+ *
+ * Measured on real sessions: a goal whose remaining work needed hardware,
+ * a live service, or a human click that the session did not have kept being
+ * handed back for another attempt until the cap ran out — in the worst case
+ * seven rounds and roughly 589k output tokens, the last three of which were
+ * restatements of the same "I cannot do this here". Every one of those rounds
+ * was unwinnable at the moment it started.
+ */
+const DEFAULT_BLOCKER_LIMIT = 2;
+
 /** What is actually watching this goal, strongest first. */
 function verifierStrength(config, goal) {
   const settings = (config && config.goals) || {};
@@ -77,6 +91,10 @@ function criteriaCommand(sessionId) {
   return `node ${JSON.stringify(cliPath())} goal criteria --session ${sessionId} "first" "second"`;
 }
 
+function blockCommand(sessionId) {
+  return `node ${JSON.stringify(cliPath())} goal block --session ${sessionId} "what is blocked and what would unblock it"`;
+}
+
 /** Criteria are data, not prose: trimmed, de-duplicated, empties dropped. */
 function normalizeCriteria(criteria) {
   const seen = new Set();
@@ -90,6 +108,38 @@ function normalizeCriteria(criteria) {
   return out;
 }
 
+/**
+ * The negative half of an objective: the clauses that say what must *not*
+ * happen. "Migrate auth off JWT, do NOT touch the billing module" carries two
+ * requirements, and only one of them is a thing to build.
+ *
+ * They are pulled out and stored separately because a violated constraint and
+ * an unmet criterion need opposite responses. Unmet means keep working; violated
+ * means stop, because a continuation cannot un-delete a directory. A real
+ * session lost four consecutive stops to a judge correctly reporting that a
+ * protected directory had already been deleted, which no further attempt could
+ * undo.
+ *
+ * ponytail: clause-splitting plus the correction regex restore.js already uses
+ * for compaction pinning. The upgrade path is asking the model for them at goal
+ * creation the way criteria work, worth doing only if the split misses cases
+ * that matter — a missed constraint costs the veto, not the goal.
+ */
+function extractConstraints(objective) {
+  const clauses = String(objective == null ? '' : objective)
+    .split(/[.;\n]+|,\s+|\s[-–—]+\s|\s+(?:but|however|while)\s+/i)
+    .map((clause) => clause.replace(/\s+/g, ' ').trim());
+  const seen = new Set();
+  const out = [];
+  for (const clause of clauses) {
+    if (clause.length < 6 || !looksLikeCorrection(clause)) continue;
+    if (seen.has(clause.toLowerCase())) continue;
+    seen.add(clause.toLowerCase());
+    out.push(clause);
+  }
+  return out;
+}
+
 function newGoal(
   objective,
   { source = 'auto', maxContinuations = 2, tokenBudget = null, turnIndex = 0, check = null, criteria = [] } = {},
@@ -98,6 +148,8 @@ function newGoal(
   const normalized = normalizeCriteria(criteria);
   return {
     objective: String(objective).trim(),
+    // What must not happen, kept apart from what must. See extractConstraints.
+    constraints: extractConstraints(objective),
     // What "done" means, fixed once and re-injected verbatim every turn.
     //
     // Without this the requirements are re-derived from prose on every
@@ -119,6 +171,9 @@ function newGoal(
     // the configured default. Exit 0 is the only thing that closes a goal
     // without the model's say-so.
     check,
+    // Work this environment cannot do, as the model reported it. Re-injected so
+    // the loop stops asking, and counted so it eventually stops looping.
+    blockers: [],
     blockedStreak: 0,
     lastBlocker: null,
     // Verification reason from the previous stop, and how many stops in a row
@@ -159,6 +214,45 @@ function recordReason(goal, reason) {
 function plateauReached(goal, config) {
   const limit = (config && config.goals && config.goals.plateauLimit) ?? 2;
   return limit > 0 && (goal.plateau || 0) >= limit;
+}
+
+/**
+ * Record something this environment cannot do.
+ *
+ * The distinction the loop was missing: "not done yet" earns another turn,
+ * "cannot be done from here" does not. The continuation prompt used to gate this
+ * escape behind the blocker having "repeated across turns", which told the model
+ * to loop at least twice before it was allowed to say it was stuck — so the
+ * declaration arrived, when it arrived at all, several rounds after it was true.
+ *
+ * Recording a blocker does not close the goal. The rest of the objective is
+ * still worth working, and a blocker the model turns out to be wrong about
+ * costs one entry, not the goal.
+ */
+function addBlocker(sessionId, reason) {
+  const goal = loadGoal(sessionId);
+  if (!goal) return null;
+  const text = String(reason == null ? '' : reason).replace(/\s+/g, ' ').trim();
+  if (!text) return goal;
+
+  const blockers = Array.isArray(goal.blockers) ? [...goal.blockers] : [];
+  const known = blockers.some((existing) => existing.toLowerCase() === text.toLowerCase());
+  if (!known) blockers.push(text);
+
+  // A repeat still counts. Re-reporting the same blocker is the loop failing to
+  // move for exactly the reason the blocker names.
+  return saveGoal(sessionId, {
+    ...goal,
+    blockers,
+    lastBlocker: text,
+    blockedStreak: (goal.blockedStreak || 0) + 1,
+  });
+}
+
+/** Enough of the objective is walled off that another continuation is a bad bet. */
+function blockedOut(goal, config) {
+  const limit = (config && config.goals && config.goals.blockerLimit) ?? DEFAULT_BLOCKER_LIMIT;
+  return limit > 0 && (goal.blockedStreak || 0) >= limit;
 }
 
 /**
@@ -299,10 +393,15 @@ function decideOnStop({ goal, config, stopHookActive, recentBatches, lastAssista
 }
 
 module.exports = {
+  DEFAULT_BLOCKER_LIMIT,
   DEFAULT_CONTINUATIONS,
   MUTATING_TOOLS,
   TERMINAL_STATUSES,
+  addBlocker,
+  blockCommand,
+  blockedOut,
   closeGoal,
+  extractConstraints,
   completeCommand,
   criteriaCommand,
   decideOnStop,

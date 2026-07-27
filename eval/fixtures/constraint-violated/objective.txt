@@ -1,0 +1,1 @@
+Remove the unused image assets and tidy the repository, without touching anything under vendor/.

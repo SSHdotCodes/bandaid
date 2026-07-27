@@ -50,18 +50,23 @@ function readIfPresent(file) {
 function loadFixture(dir) {
   const objective = readIfPresent(path.join(dir, 'objective.txt'));
   const expected = readIfPresent(path.join(dir, 'expected')).toLowerCase();
-  if (!objective || !['complete', 'continue'].includes(expected)) return null;
+  if (!objective || !['complete', 'continue', 'violated'].includes(expected)) return null;
 
-  const criteria = readIfPresent(path.join(dir, 'criteria.txt'))
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
+  const lines = (file) =>
+    readIfPresent(path.join(dir, file))
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
 
   const checkFile = path.join(dir, 'check.sh');
   return {
     name: path.basename(dir),
     objective,
-    criteria,
+    criteria: lines('criteria.txt'),
+    // The two things that change what the judge is being asked. Optional, so
+    // every fixture that predates them loads unchanged.
+    constraints: lines('constraints.txt'),
+    blockers: lines('blockers.txt'),
     expected,
     check: fs.existsSync(checkFile) ? `sh "${checkFile}"` : null,
     repo: path.join(dir, 'repo'),
@@ -75,14 +80,21 @@ function runFixture(fixture, { model, timeoutMs }) {
   try {
     fs.cpSync(fixture.repo, tmp, { recursive: true });
     const assessment = verify.assess({
-      goal: { objective: fixture.objective, criteria: fixture.criteria, check: fixture.check },
+      goal: {
+        objective: fixture.objective,
+        criteria: fixture.criteria,
+        constraints: fixture.constraints,
+        blockers: fixture.blockers,
+        check: fixture.check,
+      },
       config: { goals: { judge: true, judgeModel: model, verifyTimeoutMs: timeoutMs } },
       cwd: tmp,
       // Deliberately empty: the judge has to work from the repository, not from
       // a log of what the engineer says it did.
       turns: [],
     });
-    return { verdict: assessment.proven ? 'complete' : 'continue', reason: assessment.reason };
+    const verdict = assessment.violated ? 'violated' : assessment.proven ? 'complete' : 'continue';
+    return { verdict, reason: assessment.reason };
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -136,7 +148,9 @@ function main() {
       const { verdict, reason } = runFixture(fixture, { model, timeoutMs });
       const ok = verdict === fixture.expected;
       if (verdict === 'complete') matrix[fixture.expected === 'complete' ? 'tp' : 'fp'] += 1;
-      else matrix[fixture.expected === 'continue' ? 'tn' : 'fn'] += 1;
+      // Anything that is not "complete" left the goal open, which is the right
+      // call for both "continue" and "violated".
+      else matrix[fixture.expected === 'complete' ? 'fn' : 'tn'] += 1;
 
       rows.push({ name: fixture.name, run: i + 1, expected: fixture.expected, verdict, ok, reason, note: fixture.note });
       process.stdout.write(

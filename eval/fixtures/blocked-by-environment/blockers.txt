@@ -1,0 +1,1 @@
+confirming output on the label printer requires the physical device, which this machine is not connected to

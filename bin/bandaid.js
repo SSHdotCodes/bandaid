@@ -69,8 +69,9 @@ Usage: bandaid <command> [options]
       --budget <tokens>      Stop continuing after roughly this many tokens
   goal criteria [<c> ...]    Record the fixed acceptance criteria, or list them
       --replace              Overwrite criteria that were already fixed
+  goal block <reason>        Record something this environment cannot do, and keep going
   goal complete [note]       Mark the objective achieved (this is what the model calls)
-  goal blocked [note]        Mark the objective blocked
+  goal blocked [note]        Mark the whole objective blocked and stop
   goal clear                 Drop the objective entirely
   verify                     Run the check command and the judge now, and report
 
@@ -201,6 +202,17 @@ function cmdGoal(positional, flags) {
       const criteria = goal.criteria || [];
       out(`criteria:      ${criteria.length ? `${criteria.length} (${goal.criteriaSource || 'unknown'})` : 'none recorded'}`);
       for (const [i, text] of criteria.entries()) out(`  ${i + 1}. ${text}`);
+      const constraints = goal.constraints || [];
+      if (constraints.length) {
+        out(`constraints:   ${constraints.length} (from the objective)`);
+        for (const text of constraints) out(`  - ${text}`);
+      }
+      const blockers = goal.blockers || [];
+      if (blockers.length) {
+        const limit = config.loadConfig().goals.blockerLimit ?? goals.DEFAULT_BLOCKER_LIMIT;
+        out(`blockers:      ${blockers.length} (${goal.blockedStreak || 0}/${limit} toward stopping)`);
+        for (const [i, text] of blockers.entries()) out(`  ${i + 1}. ${text}`);
+      }
       if (goal.lastReason) out(`last verdict:  ${goal.lastReason}${goal.plateau ? ` (repeated ${goal.plateau}x)` : ''}`);
       if (goal.note) out(`note:          ${goal.note}`);
       out('');
@@ -259,6 +271,29 @@ function cmdGoal(positional, flags) {
     case 'done': {
       const goal = goals.closeGoal(sessionId, 'complete', rest.join(' ') || null);
       out(goal ? 'Goal marked complete. Bandaid will stop asking about it.' : 'No active goal to complete.');
+      return;
+    }
+    // `block` records one impossible piece and leaves the goal running;
+    // `blocked` gives up on the whole objective. Different scopes, deliberately
+    // adjacent names, because the model reaches for whichever it means.
+    case 'block': {
+      const reason = rest.join(' ').trim();
+      if (!reason) {
+        fail('goal block needs a reason: what is blocked and what would unblock it');
+        return;
+      }
+      const goal = goals.addBlocker(sessionId, reason);
+      if (!goal) {
+        fail('no active goal to record a blocker against');
+        return;
+      }
+      const limit = config.loadConfig().goals.blockerLimit ?? goals.DEFAULT_BLOCKER_LIMIT;
+      out(`Blocker recorded (${goal.blockedStreak}/${limit}). It will not be asked for again.`);
+      out(
+        goals.blockedOut(goal, config.loadConfig())
+          ? 'Enough is blocked that Bandaid will stop continuing this goal. Tell the user what would unblock it.'
+          : 'The goal is still active — keep working the parts that are not blocked.',
+      );
       return;
     }
     case 'blocked': {

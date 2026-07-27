@@ -32,7 +32,7 @@ const OUTPUT_TAIL_CHARS = 2000;
 const EVIDENCE_MAX_TOKENS = 4000;
 const DEFAULT_TIMEOUT_MS = 120000;
 
-const VERDICT_RE = /^[^\S\n]*VERDICT:[^\S\n]*(complete|continue)\b/im;
+const VERDICT_RE = /^[^\S\n]*VERDICT:[^\S\n]*(complete|continue|violated)\b/im;
 const REASON_RE = /^[^\S\n]*REASON:[^\S\n]*(.+)$/im;
 
 /** Keep the tail: a test runner puts the part you need at the end. */
@@ -85,7 +85,7 @@ function evidenceFromTurns(turns, { maxTokens = EVIDENCE_MAX_TOKENS } = {}) {
   return tail(rendered.join('\n\n'), maxTokens * 4);
 }
 
-function judgePrompt({ objective, evidence, checkOutput, criteria = [] }) {
+function judgePrompt({ objective, evidence, checkOutput, criteria = [], constraints = [], blockers = [] }) {
   // The same fixed list the worker is graded against. Without it the judge
   // derives its own reading of the objective, so a "continue" this turn and a
   // "continue" next turn are not necessarily about the same bar — which also
@@ -99,13 +99,39 @@ ${criteria.map((text, i) => `${i + 1}. ${text}`).join('\n')}
 `
     : '';
 
+  // The objective's negative half. A judge told only what to look for grades
+  // work that satisfied every criterion by breaking the one thing the objective
+  // said to leave alone as a success.
+  const vetoes = (constraints || []).length
+    ? `Constraints from the same objective. These are vetoes: work that satisfies every criterion while breaking one of these has failed, not partly succeeded.
+
+<constraints>
+${constraints.map((text) => `- ${text}`).join('\n')}
+</constraints>
+
+Check each constraint against the repository as actively as you check the criteria. Go and look at what it names. A constraint protecting something is broken when that thing is missing, emptied, or rewritten — and something that was deleted leaves no trace of itself, so look for what still references it: manifests, lockfiles, imports, config, and documentation that point at a path nothing is at any more.
+`
+    : '';
+
+  // Reported impossible from here. Left in, the judge names them as missing
+  // every round, the engineer records them as blocked every round, and the loop
+  // spends its budget on a disagreement neither side can resolve.
+  const walled = (blockers || []).length
+    ? `Recorded as blocked by the environment — hardware, services, credentials, or interactions this session does not have. Do not count these against completion, and do not ask for them:
+
+<recorded-blockers>
+${blockers.map((text) => `- ${text}`).join('\n')}
+</recorded-blockers>
+`
+    : '';
+
   return `You are auditing whether an engineer's work actually satisfies an objective. You did not do the work and you have no stake in it being finished.
 
 <objective>
 ${objective}
 </objective>
 
-${rubric}${evidence ? `The engineer's tool log for this objective, which may be incomplete or self-flattering:\n\n<evidence>\n${evidence}\n</evidence>\n` : ''}${checkOutput ? `A verification command was run and passed. Its output:\n\n<check-output>\n${checkOutput}\n</check-output>\n` : ''}
+${rubric}${vetoes}${walled}${evidence ? `The engineer's tool log for this objective, which may be incomplete or self-flattering:\n\n<evidence>\n${evidence}\n</evidence>\n` : ''}${checkOutput ? `A verification command was run and passed. Its output:\n\n<check-output>\n${checkOutput}\n</check-output>\n` : ''}
 Verify against the repository itself. Read the files, grep for the symbols, and confirm each requirement in the objective is really satisfied in the current state of the code. The log above is a claim, not proof — check it. Absence of obvious remaining work is not proof either; the objective must be positively satisfied.
 
 Judge only the objective as written. Do not require work it does not ask for, and do not accept a narrower version of it.
@@ -114,7 +140,13 @@ Reply with exactly two lines and nothing else:
 VERDICT: complete
 REASON: <one sentence>
 
-Use "complete" only if every requirement is verifiably satisfied right now. Otherwise use "continue" and make the REASON the single most important thing still missing, specific enough to act on.`;
+Use "complete" only if every requirement is verifiably satisfied right now.${
+    vetoes
+      ? `
+Use "violated" if the current state of the repository breaks one of the constraints above, and name which one in the REASON. Prefer "violated" over "continue" when both apply: unfinished work earns another attempt, a broken constraint does not.`
+      : ''
+  }
+Otherwise use "continue" and make the REASON the single most important thing still missing, specific enough to act on.`;
 }
 
 function parseVerdict(stdout) {
@@ -132,14 +164,14 @@ function parseVerdict(stdout) {
  * CLI, a crash, a timeout, or output that does not follow the contract all mean
  * the judge simply does not vote.
  */
-function runJudge({ objective, evidence = '', checkOutput = null, criteria = [], cwd, model = 'haiku', timeoutMs = DEFAULT_TIMEOUT_MS, cli = 'claude' } = {}) {
+function runJudge({ objective, evidence = '', checkOutput = null, criteria = [], constraints = [], blockers = [], cwd, model = 'haiku', timeoutMs = DEFAULT_TIMEOUT_MS, cli = 'claude' } = {}) {
   if (!objective) return null;
 
   const result = spawnSync(
     cli,
     [
       '-p',
-      judgePrompt({ objective, evidence, checkOutput, criteria }),
+      judgePrompt({ objective, evidence, checkOutput, criteria, constraints, blockers }),
       '--model',
       model,
       '--allowedTools',
@@ -193,17 +225,24 @@ function assess({ goal, config, cwd, turns = [], spawn = {} } = {}) {
     const verdict = (spawn.runJudge || runJudge)({
       objective: goal.objective,
       criteria: goal.criteria || [],
+      constraints: goal.constraints || [],
+      blockers: goal.blockers || [],
       evidence: evidenceFromTurns(turns),
       checkOutput: check ? check.output : null,
       cwd,
       model: settings.judgeModel || 'haiku',
+      cli: settings.judgeCli || 'claude',
       timeoutMs,
     });
     if (verdict) {
+      const proven = verdict.verdict === 'complete';
       return {
-        proven: verdict.verdict === 'complete',
+        proven,
+        // A violation is not a smaller kind of "continue". Nothing the next turn
+        // can do makes it untrue, so it leaves the loop rather than extending it.
+        violated: verdict.verdict === 'violated',
         reason: verdict.reason,
-        verification: { source: 'judge', ok: verdict.verdict === 'complete', output: verdict.reason },
+        verification: { source: 'judge', ok: proven, output: verdict.reason },
       };
     }
   }

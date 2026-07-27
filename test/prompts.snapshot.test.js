@@ -14,6 +14,7 @@ const {
   SUMMARIZATION_PROMPT,
   budgetLimitPrompt,
   continuationPrompt,
+  violationPrompt,
 } = require('../src/lib/prompts');
 
 /**
@@ -76,6 +77,39 @@ describe('prompt snapshots', () => {
 
   it('continuation — a check is configured and passing', () => {
     matchesSnapshot('continuation-check-configured', continuationPrompt(withCriteria, { ...opts, checkCommand: 'npm test' }));
+  });
+
+  it('continuation — constraints and recorded blockers', () => {
+    const goal = {
+      ...withCriteria,
+      constraints: ['do NOT touch the billing module'],
+      blockers: ['confirming the retry timing needs a live upstream this session cannot reach'],
+    };
+    matchesSnapshot(
+      'continuation-blocked',
+      continuationPrompt(goal, { ...opts, blockCommand: 'node /bandaid.js goal block --session S "what is blocked"' }),
+    );
+  });
+
+  it('violation — a constraint has already been broken', () => {
+    const goal = { ...withCriteria, constraints: ['do NOT touch the billing module'] };
+    matchesSnapshot(
+      'violation',
+      violationPrompt(goal, { finding: 'src/billing/index.js was rewritten, which the objective excluded.' }),
+    );
+  });
+
+  it('judge — constraints and blockers change what it is asked to do', () => {
+    matchesSnapshot(
+      'judge-constraints',
+      judgePrompt({
+        objective: 'Port the retry logic to the new client without touching the billing module',
+        criteria: withCriteria.criteria,
+        constraints: ['do NOT touch the billing module'],
+        blockers: ['confirming the retry timing needs a live upstream this session cannot reach'],
+        evidence: '--- turn 1 — 1 tool call ---\n  1. Edit\n     args: src/client.js',
+      }),
+    );
   });
 
   it('budget limit', () => {

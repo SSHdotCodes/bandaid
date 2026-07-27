@@ -33,7 +33,7 @@ const { approxTokenCount, truncateMiddleWithTokenBudget } = require('./tokens');
  * shows this misfiring — the cost of a false positive is one pinned message.
  */
 const CORRECTION_RE =
-  /(?:^|\W)(?:don't|do not|doesn't|never|instead|actually|revert|undo|rather than|not that|wrong|incorrect|stop doing|avoid|no,|nope|make sure|always use|only use|must not)(?:\W|$)/i;
+  /(?:^|\W)(?:don't|do not|doesn't|never|instead|actually|revert|undo|rather than|not that|wrong|incorrect|stop doing|avoid|no,|nope|make sure|always use|only use|must not|without (?:touching|changing|modifying|breaking|removing|deleting|using|altering))(?:\W|$)/i;
 
 /** Half, so relevance can never starve recency. */
 const PINNED_BUDGET_SHARE = 0.5;

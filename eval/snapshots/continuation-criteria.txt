@@ -53,5 +53,9 @@ How to close the goal:
 - When the audit proves the objective is finished, run:
   node /bandaid.js goal complete --session S
   then give the user your final answer. That command clears the goal so this check stops firing.
-- Only if you are truly at an impasse and cannot progress without user input or an external change, and the same blocker has now repeated across turns, run the same command with `blocked` instead of `complete` and explain the blocker.
 - Never mark a goal complete merely because the budget is nearly exhausted, because the work is hard, or because you are stopping.
+
+If part of this objective cannot be done from here:
+- "Blocked" means the environment cannot supply something, not that the work is hard, long, or unpleasant. A failing test, a difficult refactor, and a large amount of remaining work are not blockers.
+- Recording a blocker does not close the goal or excuse the rest of it. Keep working everything that is not blocked.
+- If enough of the objective is blocked that no further progress is possible, say so plainly in your final message so the user can unblock it.
