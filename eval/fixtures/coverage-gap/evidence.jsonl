@@ -1,0 +1,3 @@
+{"ts":"2026-07-27T09:00:00.000Z","kind":"check","verdict":"supported","criterion":1,"claim":"check `npm test` exited 0","pointers":["cmd:npm test"]}
+{"ts":"2026-07-27T09:00:01.000Z","kind":"check","verdict":"supported","criterion":2,"claim":"check `npm test` exited 0","pointers":["cmd:npm test"]}
+{"ts":"2026-07-27T09:05:00.000Z","kind":"claim","verdict":"unverified","criterion":3,"claim":"the delay-growth assertion is covered","pointers":["test/client.test.js"]}

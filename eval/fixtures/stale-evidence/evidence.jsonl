@@ -1,0 +1,3 @@
+{"ts":"2026-07-25T09:00:00.000Z","kind":"check","verdict":"supported","criterion":1,"claim":"check `npm test` exited 0","pointers":["cmd:npm test"],"stamp":"stale"}
+{"ts":"2026-07-25T09:00:01.000Z","kind":"check","verdict":"supported","criterion":2,"claim":"check `npm test` exited 0","pointers":["cmd:npm test"],"stamp":"stale"}
+{"ts":"2026-07-25T09:00:02.000Z","kind":"check","verdict":"supported","criterion":3,"claim":"check `npm test` exited 0","pointers":["cmd:npm test"],"stamp":"stale"}

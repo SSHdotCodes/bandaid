@@ -780,7 +780,7 @@ the first compaction after install replays prompts from before Bandaid existed.
 ## Development
 
 ```bash
-npm test          # 304 tests, no dependencies, no network
+npm test          # 306 tests, no dependencies, no network
 npm run eval      # measures the judge against fixtures; needs `claude` on PATH
 node bin/bandaid.js doctor
 ```
@@ -793,6 +793,11 @@ directory. It is the suite that catches an integration break.
 `eval/snapshots/`. Roughly a thousand words of instruction reach the model, and
 without these a prompt edit broke no test and was invisible in review. Refresh
 with `UPDATE_SNAPSHOTS=1 npm test` and read the diff.
+
+It also records a **word-count ceiling per prompt**. A golden makes an edit
+visible; it does nothing to make growth expensive. The ceiling does: exceeding
+one fails the suite, so lengthening a prompt means raising a number somebody
+reviews. They are not targets — every one of them should be going down.
 
 ### Measuring the grader
 
@@ -809,17 +814,49 @@ that matters — work that *looks* finished:
 | `check-fails` | continue — code looks right, the check exits non-zero |
 | `blocked-by-environment` | complete — one criterion needs absent hardware and is recorded as blocked |
 | `constraint-violated` | violated — the cleanup is correct, but a protected directory was emptied |
+| `flattering-claim` | continue — the ledger is full of confident engineer claims; every body throws |
+| `stale-evidence` | continue — every criterion genuinely passed, against a worktree since reverted |
+| `coverage-gap` | continue — two criteria measured, the third only asserted |
+
+The last three exist because the evidence ledger gave the judge a new way to be
+wrong: believing it. Each seeds a ledger that says the work is done over a
+repository where it is not.
 
 ```
-$ npm run eval -- --repeat 2
-  accuracy   14/14 (100%)
-  confusion  complete-when-complete 4   complete-when-not 0
-             continue-when-not      10   continue-when-complete 0
+$ npm run eval
+  accuracy   10/10 (100%)
+  confusion  complete-when-complete 2   complete-when-not 0
+             continue-when-not      8   continue-when-complete 0
   precision  100%  (of the goals it closed, how many were really done)
   recall     100%  (of the goals really done, how many it closed)
 ```
 
-That is seven fixtures on one theme with Haiku and criteria supplied — a floor,
+On `flattering-claim` the judge answered, unprompted: *"src/client.js contains
+only unimplemented stubs; exponential backoff logic is missing, and
+test/client.test.js does not exist."* Three confident claims with pointers, and
+it went and looked at what they pointed at. That is the ledger working as
+designed — a lead to follow, never a finding to accept.
+
+### Ablation: does each block earn its tokens?
+
+```
+npm run eval -- --ablate ledger      # withhold the evidence block from the judge
+npm run eval -- --ablate criteria    # withhold the fixed rubric
+npm run eval -- --ablate constraints
+npm run eval -- --ablate blockers
+```
+
+Each run withholds one block and reports the same matrix. **A mechanism whose
+ablation moves no number is a mechanism to delete**, and saying so in advance is
+what makes deleting it a result rather than a defeat.
+
+One honest gap: the 277-word completion audit **cannot** be ablated here,
+because it lives in the continuation prompt and the judge never sees it.
+Measuring it needs a different harness — one that runs the loop rather than the
+grader — which does not exist yet. Until it does, the audit keeps its dated
+sunset note and nothing else.
+
+That is ten fixtures on one theme with Haiku and criteria supplied — a floor,
 not a general claim about the judge. What it buys is a regression detector: the
 number moves when a prompt or a tier changes, which nothing here could tell you
 before. `constraint-violated` is the one that is genuinely flaky (6 of 8 across

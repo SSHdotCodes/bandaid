@@ -1,0 +1,3 @@
+src/client.js retries a failing call with exponential backoff
+src/client.js no longer references retryLegacy
+test/client.test.js asserts that successive retry delays increase

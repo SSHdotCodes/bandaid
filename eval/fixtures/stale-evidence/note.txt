@@ -1,0 +1,1 @@
+every criterion was genuinely measured and passed -- against a worktree that has since been reverted.

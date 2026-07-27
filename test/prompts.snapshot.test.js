@@ -262,3 +262,60 @@ describe('prompt snapshots', () => {
     );
   });
 });
+
+/**
+ * A ceiling on every injected prompt, recorded rather than derived.
+ *
+ * `karpathy-report.md` names the failure this exists to prevent: "each addition
+ * is individually plausible and none is ever measured, so nothing is ever
+ * removed." A golden file makes a prompt edit *visible*; it does nothing to
+ * make growth *expensive*. This does. Exceeding a ceiling fails the suite, so
+ * lengthening a prompt means raising a number in a diff somebody reviews.
+ *
+ * These are not targets. Every one of them should be going down.
+ */
+const CEILINGS = {
+  'budget-limit': 130,
+  compaction: 260,
+  'continuation-bare': 800,
+  'continuation-blocked': 960,
+  'continuation-check-configured': 850,
+  'continuation-check-failed': 910,
+  'continuation-criteria': 810,
+  'continuation-evidence': 890,
+  'continuation-expect-failed': 880,
+  'continuation-judge-finding': 870,
+  'continuation-probe-failed': 870,
+  'continuation-scope-failed': 860,
+  'judge-bare': 195,
+  'judge-constraints': 420,
+  'judge-criteria': 245,
+  'judge-ledger': 375,
+  'open-objective-adopted': 215,
+  'open-objective-offer': 265,
+  'probe-pending': 95,
+  'restore-block': 300,
+  violation: 200,
+};
+
+describe('the prompt surface does not quietly grow', () => {
+  it('keeps every injected prompt under its recorded ceiling', () => {
+    const over = [];
+    for (const [name, ceiling] of Object.entries(CEILINGS)) {
+      const file = path.join(DIR, `${name}.txt`);
+      if (!fs.existsSync(file)) continue;
+      const words = fs.readFileSync(file, 'utf8').split(/\s+/).filter(Boolean).length;
+      if (words > ceiling) over.push(`${name}: ${words} words, ceiling ${ceiling}`);
+    }
+    assert.deepEqual(over, [], 'raising a ceiling is a deliberate line in a diff, not a side effect');
+  });
+
+  it('has a ceiling for every golden, so a new prompt cannot slip in unmeasured', () => {
+    const missing = fs
+      .readdirSync(DIR)
+      .filter((f) => f.endsWith('.txt'))
+      .map((f) => f.replace(/\.txt$/, ''))
+      .filter((name) => !(name in CEILINGS));
+    assert.deepEqual(missing, [], 'add the new prompt to CEILINGS in test/prompts.snapshot.test.js');
+  });
+});
