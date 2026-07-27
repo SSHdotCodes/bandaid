@@ -292,3 +292,73 @@ same effort spent on a verifier would be a measured one.
 - [Keep AI on the leash](https://www.techtimes.com/articles/310925/20250620/openais-andrej-karpathy-warns-against-unleashing-unsupervised-agents-too-soon-keep-ai-leash.htm)
 - [Hallucination as the default mode](https://the-decoder.com/here-is-an-interesting-take-on-llm-hallucinations-by-andrej-karpathy/)
 - [On memory, context, and why agents don't work yet](https://thegenios.com/blog/karpathy-on-memory-and-context/) — incl. Dwarkesh interview, Oct 2025
+
+---
+
+## 7. What shipped, and what the measurement said
+
+Added 2026-07-28, after the work this report argued for was built. §4's four
+changes had already landed before this section existed; what follows is the
+round that came after.
+
+### The four claims, re-scored
+
+| Claim | Then | Now |
+|---|---|---|
+| **1.1** the *right* information for the next step | discharged for compaction, absent across days | project-scoped goals and an evidence ledger keyed to the worktree they were measured against |
+| **1.2** anything surviving a reset goes to disk | true within a session; a session reset was the one not survived | `projects/<key>/` outlives the conversation; a new session is *offered* the objective rather than given it |
+| **1.3** put something in the loop that is not the model | discharged twice, by exactly two things | five: check, expectations, scope, probes, judge — and probes may decline |
+| **1.4** autonomy is a privilege a verifier earns | slider shipped, two rungs | still two rungs, deliberately: probes veto but never prove, so they cannot cause a false close and do not earn a longer leash |
+
+### The rule this report set, applied
+
+> the standing rule for anything added later is: *prefer a check over a
+> paragraph.*
+
+Held. Across six phases the continuation prompt gained **three lines**: an
+evidence summary computed by the runtime, a probe-failure section, and a pointer
+to `bandaid self-check`. Everything else went into mechanisms with exit statuses,
+and every one of them is invisible — byte-identical output — to a user who has
+turned none of it on. All thirteen goldens that existed when this section was
+written are unchanged.
+
+A ceiling per prompt now enforces that in code rather than in prose: exceeding a
+recorded word count fails the suite, and adding a prompt without a ceiling fails
+too. §5's warning — *"each addition is individually plausible and none is ever
+measured, so nothing is ever removed"* — has a test behind it.
+
+### The part that did not go the way it was argued for
+
+§4 line 224 asked for an eval harness on the grounds that it "is the one that
+makes the other three falsifiable." It did, and the first thing it falsified was
+one of ours.
+
+```
+npm run eval                      accuracy 10/10   precision 100%
+npm run eval -- --ablate ledger   accuracy 10/10   precision 100%
+```
+
+The evidence ledger — `best-goal-report.md`'s Tier-2 recommendation, the one
+this report noted as never taken — changes nothing on this suite, and costs up
+to 3000 tokens per judged stop.
+
+The honest reading is *unmeasured*, not *useless*: every fixture is a single
+judgement over a fresh repository that already contains the ground truth, so a
+judge that reads the files needs no history, and the case the ledger exists for
+is day three. Both runs also sit at 100%, so there is no headroom to show a
+difference either way. It is kept, labelled, and dated, and the fixture that
+would settle it — two sequential judgements over a repository that changes
+between them — is named in the module and does not exist yet.
+
+That is the discipline this report asked for working as intended. The
+alternative was shipping a plausible mechanism and assuming it helped, which is
+precisely what §5 exists to forbid.
+
+### The compensator, still standing
+
+The 277-word completion audit is still there, now with the dated sunset note
+§5 asked for and a mechanical counterpart (`bandaid self-check`) that computes
+what it asks the model to assert. It cannot be ablated by this harness, because
+it lives in the continuation prompt and the judge never sees it. Measuring it
+needs a harness that runs the loop rather than the grader. Saying so is better
+than quoting a number that does not cover it.
