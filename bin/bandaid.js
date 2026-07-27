@@ -36,9 +36,16 @@ function parseArgs(argv) {
     }
     if (arg.startsWith('--')) {
       const [key, inline] = arg.slice(2).split('=');
-      if (inline !== undefined) flags[key] = inline;
-      else if (argv[i + 1] && !argv[i + 1].startsWith('--')) flags[key] = argv[(i += 1)];
-      else flags[key] = true;
+      let value;
+      if (inline !== undefined) value = inline;
+      else if (argv[i + 1] && !argv[i + 1].startsWith('--')) value = argv[(i += 1)];
+      else value = true;
+
+      // A flag given twice accumulates rather than overwriting, so
+      // `--pointer a --pointer b` means both. Given once it stays a scalar, so
+      // every existing caller reads exactly what it always did.
+      if (key in flags) flags[key] = [].concat(flags[key], value);
+      else flags[key] = value;
     } else {
       positional.push(arg);
     }
@@ -99,6 +106,11 @@ Usage: bandaid <command> [options]
   goal history               Show the project's open objective and its sessions
   goal clear [--project]     Drop the session's objective, or the project's record
   verify                     Run the check command and the judge now, and report
+
+  evidence show              The claims-with-pointers ledger for this objective
+  evidence add <claim>       Record something you established (always unverified)
+      --criterion N          Which acceptance criterion it bears on
+      --pointer <ref>        Where to check it: file.js:12, or "cmd:npm test"
 
   inspect [--session ID]     Summarize the ledger for a session
   preview [--session ID]     Print exactly what would be injected after a compaction
@@ -469,6 +481,7 @@ function cmdVerify(flags) {
     config: cfg,
     cwd: flags.cwd || process.cwd(),
     turns: store.readTurns(sessionId),
+    record: true,
   });
 
   if (flags.json) {
@@ -547,6 +560,80 @@ function cmdPrompt() {
   out(SUMMARIZATION_PROMPT);
   out('');
   out(COMPACTION_FIDELITY_ADDENDUM);
+}
+
+/**
+ * The evidence ledger.
+ *
+ * `add` is the model's only way in, and it is deliberately narrow: whatever it
+ * asks for, the record lands as an unverified claim. A claim with a pointer is
+ * a lead for a reviewer to check; it is never a finding, and nothing the model
+ * writes can be mistaken for something the runtime measured.
+ */
+function cmdEvidence(positional, flags) {
+  const [sub, ...rest] = positional;
+  const sessionId = resolveSession(flags);
+  const goal = sessionId ? goals.loadGoal(sessionId) : null;
+
+  if (!goal || !goal.projectRoot) {
+    fail('no active goal with a project to record evidence against');
+    return;
+  }
+
+  const evidence = require('../src/lib/evidence');
+  const { worktreeStamp } = require('../src/lib/stamp');
+  const hash = evidence.objectiveHash(goal.objective);
+
+  if ((sub || 'show') === 'show') {
+    const entries = evidence.read(goal.projectRoot, { objectiveHash: hash });
+    if (flags.json) {
+      out(JSON.stringify(entries, null, 2));
+      return;
+    }
+    if (!entries.length) {
+      out('No evidence recorded for this objective yet.');
+      return;
+    }
+    const stamp = worktreeStamp(goal.projectRoot);
+    out(evidence.render(entries, { currentStamp: stamp, maxTokens: 100000 }));
+    return;
+  }
+
+  if (sub !== 'add') {
+    fail(`unknown evidence subcommand "${sub}"`);
+    return;
+  }
+
+  const claim = rest.join(' ').trim();
+  if (!claim) {
+    fail('evidence add needs a claim: what is now true');
+    return;
+  }
+
+  const pointers = [].concat(flags.pointer || []).filter((p) => typeof p === 'string');
+  const criterion = flags.criterion ? Number.parseInt(flags.criterion, 10) : null;
+
+  const record = evidence.append(
+    goal.projectRoot,
+    {
+      sessionId,
+      objectiveHash: hash,
+      criterion,
+      claim,
+      pointers,
+      stamp: worktreeStamp(goal.projectRoot).fp,
+    },
+    { byModel: true },
+  );
+
+  if (!record) {
+    fail('nothing recorded');
+    return;
+  }
+  out(`Recorded as an unverified claim${criterion ? ` against criterion ${criterion}` : ''}.`);
+  if (!pointers.length) {
+    out('No pointer was given, so a reviewer has nowhere to go and check it. Pass --pointer file.js:12 or --pointer "cmd:npm test".');
+  }
 }
 
 function cmdSessions(positional, flags) {
@@ -631,6 +718,8 @@ function main(argv) {
       return cmdPreview(flags);
     case 'prompt':
       return cmdPrompt();
+    case 'evidence':
+      return cmdEvidence(positional, flags);
     case 'sessions':
       return cmdSessions(positional, flags);
     default:

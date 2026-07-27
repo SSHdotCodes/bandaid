@@ -1,0 +1,45 @@
+You are auditing whether an engineer's work actually satisfies an objective. You did not do the work and you have no stake in it being finished.
+
+<objective>
+Port the retry logic to the new client
+</objective>
+
+The acceptance criteria, fixed when the goal was set. Judge against these and only these:
+
+<acceptance-criteria>
+1. npm test exits 0
+2. src/client.js no longer references retryLegacy
+3. the backoff delays actually grow
+</acceptance-criteria>
+The evidence ledger for this objective, accumulated across every session that has worked it.
+
+Entries marked "engineer" were written by the engineer doing the work. They are unverified assertions, each carrying a pointer — go and look at what it points to rather than accepting it. Entries marked "measured" were recorded by the runtime from an exit status the engineer did not control: they are facts about what was run, not about what it means.
+
+<evidence-ledger>
+criterion 1  measured  supported  check `npm test` exited 0  [2026-07-26 14:31]
+                                  cmd:npm test
+criterion 2  engineer  unverified the migration is idempotent  [2026-07-26 14:02]
+                                  src/migrate.js:88
+
+Recorded against an earlier state of the worktree. Treat as history, not as current proof — especially the failures, which are the record of what has already been tried:
+criterion 1  measured  refuted    check `npm test` did not succeed  (stale)  [2026-07-25 09:11]
+                                  cmd:npm test
+</evidence-ledger>
+The engineer's tool log for this objective, which may be incomplete or self-flattering:
+
+<evidence>
+--- turn 1 — 1 tool call ---
+  1. Edit
+     args: src/client.js
+</evidence>
+
+Verify against the repository itself. Read the files, grep for the symbols, and confirm each requirement in the objective is really satisfied in the current state of the code. The log above is a claim, not proof — check it. Absence of obvious remaining work is not proof either; the objective must be positively satisfied.
+
+Judge only the objective as written. Do not require work it does not ask for, and do not accept a narrower version of it.
+
+Reply with exactly two lines and nothing else:
+VERDICT: complete
+REASON: <one sentence>
+
+Use "complete" only if every requirement is verifiably satisfied right now.
+Otherwise use "continue" and make the REASON the single most important thing still missing, specific enough to act on.

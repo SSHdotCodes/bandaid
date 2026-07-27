@@ -181,7 +181,15 @@ ${circling}`;
  */
 function continuationPrompt(
   goal,
-  { completeCommand, verification = null, checkCommand = null, criteriaCommand = null, blockCommand = null },
+  {
+    completeCommand,
+    verification = null,
+    checkCommand = null,
+    criteriaCommand = null,
+    blockCommand = null,
+    evidenceCommand = null,
+    evidenceSummary = '',
+  },
 ) {
   const { budget, used, remaining } = formatBudgetLine(goal);
   const hasCriteria = Boolean(goal.criteria && goal.criteria.length);
@@ -234,7 +242,19 @@ ${
 - Match the verification scope to the requirement's scope; do not use a narrow check to support a broad claim.
 - Treat tests, manifests, verifiers, green checks, and search results as evidence only after confirming they cover the relevant requirement.
 - Treat uncertain or indirect evidence as not achieved; gather stronger evidence or continue the work.
-- The audit must prove completion, not merely fail to find obvious remaining work.
+- The audit must prove completion, not merely fail to find obvious remaining work.${
+    evidenceSummary
+      ? `
+
+${evidenceSummary} This is counted from the ledger, not from your account of the work. A criterion nothing measured is not a criterion that passed.${
+          evidenceCommand
+            ? `
+When you establish something the runtime did not measure, record it with its pointer so a later reviewer can check it rather than take your word:
+  ${evidenceCommand}`
+            : ''
+        }`
+      : ''
+  }
 
 Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Marking the goal complete is a claim that the full objective has been finished and can withstand requirement-by-requirement scrutiny. Only mark the goal achieved when current evidence proves every requirement has been satisfied and no required work remains. If the evidence is incomplete, weak, indirect, merely consistent with completion, or leaves any requirement missing, incomplete, or unverified, keep working instead of marking it complete.
 

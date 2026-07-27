@@ -37,6 +37,24 @@ function turnsForGoal(sessionId, goal) {
   return store.readTurnsSince(sessionId, goal.turnIndex);
 }
 
+/**
+ * How each criterion actually stands, according to the ledger rather than the
+ * model. Empty when the goal has no criteria or no project to record against,
+ * which is also what keeps the injected prompt byte-identical for anyone who
+ * has not turned any of this on.
+ */
+function evidenceSummaryFor(goal) {
+  if (!goal.projectRoot || !(goal.criteria || []).length) return '';
+  try {
+    const evidence = require('../lib/evidence');
+    const { worktreeStamp } = require('../lib/stamp');
+    const entries = evidence.read(goal.projectRoot, { objectiveHash: evidence.objectiveHash(goal.objective) });
+    return evidence.summarize(entries, goal.criteria.length, worktreeStamp(goal.projectRoot));
+  } catch {
+    return '';
+  }
+}
+
 function estimateTokensUsed(turns) {
   let total = 0;
   for (const turn of turns) {
@@ -88,6 +106,9 @@ runHook('Stop', ({ input, config }) => {
     config,
     cwd: input.cwd,
     turns,
+    // Every verdict from here is written to the project's evidence ledger, so
+    // tomorrow's judge knows what today's already established.
+    record: true,
   });
 
   // Proof outranks the model in the generous direction too: a goal whose check
@@ -149,6 +170,10 @@ runHook('Stop', ({ input, config }) => {
       completeCommand: cmd,
       criteriaCommand: goals.criteriaCommand(sessionId),
       blockCommand: goals.blockCommand(sessionId),
+      evidenceCommand: updated.projectRoot ? goals.evidenceCommand(sessionId) : null,
+      // One line, computed by the runtime, where the audit otherwise asks the
+      // model to grade its own criteria one at a time and take its own word.
+      evidenceSummary: evidenceSummaryFor(updated),
       verification: assessment.verification,
       checkCommand: updated.check ?? (config.goals || {}).check ?? null,
     }),

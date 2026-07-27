@@ -80,6 +80,16 @@ const OPEN_RECORD = {
   },
 };
 
+const { render: renderLedger } = require('../src/lib/evidence');
+const LEDGER = renderLedger(
+  [
+    { ts: '2026-07-26T14:31:00Z', criterion: 1, kind: 'check', verdict: 'supported', claim: 'check `npm test` exited 0', pointers: ['cmd:npm test'], stamp: 'now' },
+    { ts: '2026-07-26T14:02:00Z', criterion: 2, kind: 'claim', verdict: 'unverified', claim: 'the migration is idempotent', pointers: ['src/migrate.js:88'], stamp: 'now' },
+    { ts: '2026-07-25T09:11:00Z', criterion: 1, kind: 'check', verdict: 'refuted', claim: 'check `npm test` did not succeed', pointers: ['cmd:npm test'], stamp: 'then' },
+  ],
+  { currentStamp: { fp: 'now', method: 'git' } },
+);
+
 describe('prompt snapshots', () => {
   it('open objective — offered to a session that has not taken it up', () => {
     matchesSnapshot(
@@ -128,6 +138,29 @@ describe('prompt snapshots', () => {
     matchesSnapshot(
       'continuation-blocked',
       continuationPrompt(goal, { ...opts, blockCommand: 'node /bandaid.js goal block --session S "what is blocked"' }),
+    );
+  });
+
+  it('continuation — the ledger reports the score', () => {
+    matchesSnapshot(
+      'continuation-evidence',
+      continuationPrompt(withCriteria, {
+        ...opts,
+        evidenceSummary: 'Evidence by criterion: 1 measured · 2 asserted but not measured · 3 no evidence.',
+        evidenceCommand: 'node /bandaid.js evidence add --session S --criterion N --pointer file.js:12 -- "what is now true"',
+      }),
+    );
+  });
+
+  it('judge — reading the ledger as well as the worktree', () => {
+    matchesSnapshot(
+      'judge-ledger',
+      judgePrompt({
+        objective: 'Port the retry logic to the new client',
+        criteria: withCriteria.criteria,
+        ledger: LEDGER,
+        evidence: '--- turn 1 — 1 tool call ---\n  1. Edit\n     args: src/client.js',
+      }),
     );
   });
 

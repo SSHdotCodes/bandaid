@@ -220,6 +220,46 @@ as it always should have. And `/clear` drops the session's copy while leaving
 the project record — clearing your scrollback is not the same as abandoning
 three days of work.
 
+### The evidence ledger
+
+The judge is handed a rendered digest of the current session's tool calls. On day
+three of a goal that is nothing at all from days one and two — so it grades from
+the repository alone, which is *safe* but not *informed*: it cannot know that
+yesterday's approach was tried and abandoned, or that criterion 3 was proven at
+4pm by a check that has since gone red.
+
+So verdicts accumulate in `projects/<key>/evidence.jsonl` as **claims with
+pointers**. A tool digest says what happened; an evidence record says what is
+claimed to be true and where to go and check.
+
+```
+criterion 1  measured  supported  check `npm test` exited 0        [2026-07-26 14:31]
+                                  cmd:npm test
+criterion 2  engineer  unverified the migration is idempotent      [2026-07-26 14:02]
+                                  src/migrate.js:88
+```
+
+**The asymmetry is the point.** The runtime writes what it measured from an exit
+status. The model may only ever append an `unverified` claim — `bandaid evidence
+add` forces the kind and the verdict no matter what it asks for. A claim is a
+lead for the judge to follow, never a finding.
+
+Each record carries a fingerprint of the worktree it was taken against, so a
+proof from Monday is shown to Thursday's judge as history rather than as current
+truth. Failures are kept for exactly the reason they are worth keeping: the
+record of what has already been tried is the best guard there is against
+re-running a dead end.
+
+That arithmetic also produces one line in the continuation prompt, in place of
+several paragraphs asking the model to grade its own criteria:
+
+```
+Evidence by criterion: 1 measured · 2 asserted but not measured · 3 no evidence.
+```
+
+Where the criteria section states the bar, that line reports the score — and a
+criterion nothing measured is not a criterion that passed.
+
 ### Blockers: the difference between "not yet" and "not from here"
 
 A loop that only knows *unfinished* treats "the tests don't pass yet" and "proving
@@ -375,7 +415,7 @@ Bandaid's off and use the native one if you prefer.
 
 The `bandaid` CLI has the same surface plus `install`, `uninstall`, `doctor`,
 `inspect`, `sessions`, `sessions prune`, `prompt`, `goal criteria`, `goal block`,
-and `on`/`off`.
+`goal adopt`, `goal history`, `evidence show`, `evidence add`, and `on`/`off`.
 `goal block <reason>` records one thing this environment cannot do and keeps the
 goal running; `goal blocked` gives up on the whole objective.
 
@@ -510,6 +550,11 @@ the first compaction after install replays prompts from before Bandaid existed.
   two projects, which is usually what you want and occasionally is not. Outside
   git it falls back to the directory, so moving a non-git project loses its
   record.
+- **The ledger's staleness rule is coarse.** Any tracked edit moves the worktree
+  fingerprint, so on a busy day most records show as history rather than as
+  current proof. That errs in the safe direction — the judge re-reads the files
+  anyway — but it costs tokens, and content-hashing only the changed set is the
+  upgrade if it bites.
 - **Nothing was ever deleted before now.** Retention is on by default and sweeps
   at most once a day from `SessionStart`; `bandaid sessions prune --dry-run`
   shows what it would take first.
@@ -522,7 +567,7 @@ the first compaction after install replays prompts from before Bandaid existed.
 ## Development
 
 ```bash
-npm test          # 202 tests, no dependencies, no network
+npm test          # 230 tests, no dependencies, no network
 npm run eval      # measures the judge against fixtures; needs `claude` on PATH
 node bin/bandaid.js doctor
 ```

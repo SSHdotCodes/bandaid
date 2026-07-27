@@ -85,7 +85,7 @@ function evidenceFromTurns(turns, { maxTokens = EVIDENCE_MAX_TOKENS } = {}) {
   return tail(rendered.join('\n\n'), maxTokens * 4);
 }
 
-function judgePrompt({ objective, evidence, checkOutput, criteria = [], constraints = [], blockers = [] }) {
+function judgePrompt({ objective, evidence, checkOutput, criteria = [], constraints = [], blockers = [], ledger = '' }) {
   // The same fixed list the worker is graded against. Without it the judge
   // derives its own reading of the objective, so a "continue" this turn and a
   // "continue" next turn are not necessarily about the same bar — which also
@@ -131,7 +131,7 @@ ${blockers.map((text) => `- ${text}`).join('\n')}
 ${objective}
 </objective>
 
-${rubric}${vetoes}${walled}${evidence ? `The engineer's tool log for this objective, which may be incomplete or self-flattering:\n\n<evidence>\n${evidence}\n</evidence>\n` : ''}${checkOutput ? `A verification command was run and passed. Its output:\n\n<check-output>\n${checkOutput}\n</check-output>\n` : ''}
+${rubric}${vetoes}${walled}${ledger ? `${ledger}\n` : ''}${evidence ? `The engineer's tool log for this objective, which may be incomplete or self-flattering:\n\n<evidence>\n${evidence}\n</evidence>\n` : ''}${checkOutput ? `A verification command was run and passed. Its output:\n\n<check-output>\n${checkOutput}\n</check-output>\n` : ''}
 Verify against the repository itself. Read the files, grep for the symbols, and confirm each requirement in the objective is really satisfied in the current state of the code. The log above is a claim, not proof — check it. Absence of obvious remaining work is not proof either; the objective must be positively satisfied.
 
 Judge only the objective as written. Do not require work it does not ask for, and do not accept a narrower version of it.
@@ -164,14 +164,14 @@ function parseVerdict(stdout) {
  * CLI, a crash, a timeout, or output that does not follow the contract all mean
  * the judge simply does not vote.
  */
-function runJudge({ objective, evidence = '', checkOutput = null, criteria = [], constraints = [], blockers = [], cwd, model = 'haiku', timeoutMs = DEFAULT_TIMEOUT_MS, cli = 'claude' } = {}) {
+function runJudge({ objective, evidence = '', checkOutput = null, criteria = [], constraints = [], blockers = [], ledger = '', cwd, model = 'haiku', timeoutMs = DEFAULT_TIMEOUT_MS, cli = 'claude' } = {}) {
   if (!objective) return null;
 
   const result = spawnSync(
     cli,
     [
       '-p',
-      judgePrompt({ objective, evidence, checkOutput, criteria, constraints, blockers }),
+      judgePrompt({ objective, evidence, checkOutput, criteria, constraints, blockers, ledger }),
       '--model',
       model,
       '--allowedTools',
@@ -203,22 +203,78 @@ function runJudge({ objective, evidence = '', checkOutput = null, criteria = [],
  * is precisely Bandaid's original behaviour: block, and let the audit prompt do
  * the work.
  */
-function assess({ goal, config, cwd, turns = [], spawn = {} } = {}) {
+/**
+ * What the ledger has to say about this objective, and how to write to it.
+ *
+ * Both are no-ops unless the goal carries a project root, which is what keeps
+ * `assess` a pure function for the eval harness and every existing test: a
+ * synthetic goal has no project, so nothing is read and nothing is written.
+ */
+function ledgerFor(goal, cwd) {
+  if (!goal || !goal.projectRoot) return { text: '', record: () => {}, stamp: null };
+
+  const evidence = require('./evidence');
+  const { worktreeStamp } = require('./stamp');
+
+  let stamp = null;
+  let text = '';
+  try {
+    stamp = worktreeStamp(goal.projectRoot);
+    const entries = evidence.read(goal.projectRoot, { objectiveHash: evidence.objectiveHash(goal.objective) });
+    text = evidence.render(entries, { currentStamp: stamp });
+  } catch {
+    /* a ledger that cannot be read is simply absent */
+  }
+
+  const record = (entry) => {
+    try {
+      evidence.append(goal.projectRoot, {
+        ...entry,
+        objectiveHash: evidence.objectiveHash(goal.objective),
+        stamp: stamp ? stamp.fp : null,
+      });
+    } catch {
+      /* never at the cost of the verdict */
+    }
+  };
+
+  return { text, record, stamp, cwd };
+}
+
+function assess({ goal, config, cwd, turns = [], spawn = {}, record = false } = {}) {
   const settings = (config && config.goals) || {};
   const timeoutMs = settings.verifyTimeoutMs || DEFAULT_TIMEOUT_MS;
   const command = goal && goal.check != null ? goal.check : settings.check;
   const judgeEnabled = settings.judge === true;
 
+  const ledger = record ? ledgerFor(goal, cwd) : { text: '', record: () => {} };
   const check = (spawn.runCheck || runCheck)(command, { cwd, timeoutMs });
 
   // Ground truth outranks every opinion, including the judge's. If the command
   // says no, there is nothing left to deliberate.
   if (check && !check.ok) {
+    ledger.record({
+      kind: 'check',
+      claim: `check \`${command}\` did not succeed`,
+      pointers: [`cmd:${command}`],
+      verdict: 'refuted',
+      detail: check.output,
+    });
     return {
       proven: false,
       reason: `check failed: ${command}`,
       verification: { source: 'check', command, ok: false, output: check.output },
     };
+  }
+
+  if (check && check.ok) {
+    ledger.record({
+      kind: 'check',
+      claim: `check \`${command}\` exited 0`,
+      pointers: [`cmd:${command}`],
+      verdict: 'supported',
+      detail: check.output,
+    });
   }
 
   if (judgeEnabled) {
@@ -227,6 +283,9 @@ function assess({ goal, config, cwd, turns = [], spawn = {} } = {}) {
       criteria: goal.criteria || [],
       constraints: goal.constraints || [],
       blockers: goal.blockers || [],
+      // The ledger goes ahead of the session digest: it is the only thing that
+      // knows what happened on the days this session was not running.
+      ledger: ledger.text,
       evidence: evidenceFromTurns(turns),
       checkOutput: check ? check.output : null,
       cwd,
@@ -236,6 +295,12 @@ function assess({ goal, config, cwd, turns = [], spawn = {} } = {}) {
     });
     if (verdict) {
       const proven = verdict.verdict === 'complete';
+      ledger.record({
+        kind: 'judge',
+        claim: verdict.reason || `judge returned ${verdict.verdict}`,
+        verdict: proven ? 'supported' : 'refuted',
+        detail: verdict.verdict,
+      });
       return {
         proven,
         // A violation is not a smaller kind of "continue". Nothing the next turn

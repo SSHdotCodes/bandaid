@@ -129,6 +129,10 @@ function clearProjectCommand() {
   return `node ${JSON.stringify(cliPath())} goal clear --project`;
 }
 
+function evidenceCommand(sessionId) {
+  return `node ${JSON.stringify(cliPath())} evidence add --session ${sessionId} --criterion N --pointer file.js:12 -- "what is now true"`;
+}
+
 function blockCommand(sessionId) {
   return `node ${JSON.stringify(cliPath())} goal block --session ${sessionId} "what is blocked and what would unblock it"`;
 }
@@ -289,6 +293,23 @@ function addBlocker(sessionId, reason) {
   const blockers = Array.isArray(goal.blockers) ? [...goal.blockers] : [];
   const known = blockers.some((existing) => existing.toLowerCase() === text.toLowerCase());
   if (!known) blockers.push(text);
+
+  // A wall is worth remembering across days: without it, tomorrow's session
+  // rediscovers the missing GPU at the same cost as today's did.
+  if (!known && goal.projectRoot) {
+    try {
+      const evidence = require('./evidence');
+      evidence.append(goal.projectRoot, {
+        sessionId,
+        objectiveHash: evidence.objectiveHash(goal.objective),
+        kind: 'blocker',
+        claim: text,
+        verdict: 'refuted',
+      });
+    } catch {
+      /* the ledger is never worth failing a blocker over */
+    }
+  }
 
   // A repeat still counts. Re-reporting the same blocker is the loop failing to
   // move for exactly the reason the blocker names.
@@ -518,6 +539,7 @@ module.exports = {
   criteriaCommand,
   decideOnStop,
   endsWithQuestionToUser,
+  evidenceCommand,
   isGoalWorthy,
   loadGoal,
   newGoal,
