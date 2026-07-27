@@ -18,13 +18,25 @@ const path = require('node:path');
 
 const MARKER = 'bandaid';
 
+/**
+ * Must stay byte-for-byte in step with `hooks/hooks.json`, which is what the
+ * plugin install path uses. They disagreed once — 20s here against 30s there —
+ * and the two install paths silently produced different behaviour under a slow
+ * restore. `test/install.test.js` now asserts they agree.
+ *
+ * The Stop budget has to clear the slowest verifier it can run. The judge is
+ * measured at 12–16s and `goals.verifyTimeoutMs` defaults to 120s, so a 15s
+ * hook was killing verdicts mid-flight — and a killed hook is not exit 2, so
+ * the stop went through unverified. That is a fail-open in the one place this
+ * whole design is a fail-closed loop.
+ */
 const HOOK_EVENTS = [
   { event: 'UserPromptSubmit', file: 'user-prompt-submit.js', timeout: 10 },
   { event: 'PostToolBatch', file: 'post-tool-batch.js', timeout: 10 },
-  { event: 'PreCompact', file: 'pre-compact.js', timeout: 20 },
-  { event: 'SessionStart', file: 'session-start.js', timeout: 20 },
+  { event: 'PreCompact', file: 'pre-compact.js', timeout: 30 },
+  { event: 'SessionStart', file: 'session-start.js', timeout: 30 },
   { event: 'PostCompact', file: 'post-compact.js', timeout: 10 },
-  { event: 'Stop', file: 'stop.js', timeout: 15 },
+  { event: 'Stop', file: 'stop.js', timeout: 130 },
 ];
 
 function repoRoot() {

@@ -37,11 +37,16 @@ runHook('UserPromptSubmit', ({ input, config }) => {
 
   const goalConfig = config.goals || {};
   if (goalConfig.enabled !== false && goalConfig.mode === 'auto' && goals.isGoalWorthy(prompt)) {
+    const check = goalConfig.check ?? null;
     goals.setGoal(sessionId, prompt, {
       source: 'auto',
-      maxContinuations: goals.resolveMaxContinuations(config),
+      // Resolved against the goal this is about to become, not against config
+      // alone. Today that only matters for the configured check; it is the seam
+      // a per-goal verifier resolves through.
+      maxContinuations: goals.resolveMaxContinuations(config, { check }),
       tokenBudget: goalConfig.tokenBudget ?? null,
       turnIndex,
+      cwd,
     });
   } else {
     // A new prompt during an explicit goal resets its continuation budget so a

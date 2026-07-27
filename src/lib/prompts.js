@@ -25,17 +25,13 @@ Include:
 
 Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`;
 
-/** Codex `SUMMARY_PREFIX` — the framing Codex puts in front of a summary. */
-const SUMMARY_PREFIX =
-  'Another language model started to solve this problem and produced a summary of its thinking process. ' +
-  'You also have access to the state of the tools that were used by that language model. ' +
-  'Use this to build on the work that has already been done and avoid duplicating work. ' +
-  'Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:';
-
 /**
- * The same framing, retargeted. Claude Code writes and places its own summary,
- * so Bandaid cannot prefix it — this points at the summary already above and
- * carries the part that matters: build on it, do not redo it.
+ * Codex's `SUMMARY_PREFIX`, retargeted. Claude Code writes and places its own
+ * summary, so Bandaid cannot prefix it — this points at the summary already
+ * above and carries the part that matters: build on it, do not redo it.
+ *
+ * Codex's original wording is not kept alongside this one. It was exported and
+ * never injected, which is an invitation to edit the wrong constant.
  */
 const RESTORE_FRAMING =
   'Another language model produced the summary immediately above from the earlier part of this conversation. ' +
@@ -157,13 +153,24 @@ function blockersSection(goal) {
   const blockers = (goal && goal.blockers) || [];
   if (!blockers.length) return '';
   const lines = blockers.map((text, i) => `${i + 1}. ${escapeXmlText(text)}`);
+
+  // `blockedStreak` counts every report, `blockers` holds the distinct ones, so
+  // a gap between them means the same wall was hit again. That is a different
+  // situation from two separate walls and deserves saying: the loop is not
+  // spreading out across the objective, it is circling one thing.
+  const repeated = Math.max(0, (goal.blockedStreak || 0) - blockers.length);
+  const circling =
+    repeated && goal.lastBlocker
+      ? `\nYou have now reported "${escapeXmlText(goal.lastBlocker)}" more than once. Re-reporting it does not move the goal — it is already accepted above. Work something else, or say plainly that the rest cannot proceed without it.\n`
+      : '';
+
   return `
 Already recorded as blocked by this environment. Do not re-attempt these and do not re-argue them — they are accepted. Spend this turn on the rest of the objective:
 
 <recorded-blockers>
 ${lines.join('\n')}
 </recorded-blockers>
-`;
+${circling}`;
 }
 
 /**
@@ -320,7 +327,6 @@ module.exports = {
   COMPACTION_FIDELITY_ADDENDUM,
   RESTORE_FRAMING,
   SUMMARIZATION_PROMPT,
-  SUMMARY_PREFIX,
   blockersSection,
   budgetLimitPrompt,
   constraintsSection,

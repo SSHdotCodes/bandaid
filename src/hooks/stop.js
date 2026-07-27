@@ -27,11 +27,14 @@ const { approxTokenCount } = require('../lib/tokens');
 const { budgetLimitPrompt, continuationPrompt, violationPrompt } = require('../lib/prompts');
 const { emitBlocking, runHook } = require('../lib/hookio');
 
-/** Turns recorded since the goal was set — the work the goal is accountable for. */
+/**
+ * Turns recorded since the goal was set — the work the goal is accountable for.
+ *
+ * Read backwards from the end rather than parsing the whole ledger: this runs
+ * on every Stop, and a multi-day session's turns.jsonl is megabytes.
+ */
 function turnsForGoal(sessionId, goal) {
-  return store
-    .readTurns(sessionId)
-    .filter((turn) => !Number.isFinite(goal.turnIndex) || turn.turnIndex >= goal.turnIndex);
+  return store.readTurnsSince(sessionId, goal.turnIndex);
 }
 
 function estimateTokensUsed(turns) {

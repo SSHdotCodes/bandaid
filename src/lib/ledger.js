@@ -81,7 +81,28 @@ function adoptPreviousLedger(sessionId, cwd, previousSessionId = null) {
   } catch {
     // A session with prompts but no tool calls is legitimate.
   }
+  adoptGoal(sessionId, previous);
   store.updateMeta(sessionId, { turnIndex: prompts.length, adoptedFrom: previous });
+  return true;
+}
+
+/**
+ * Carry a still-open objective across a resume.
+ *
+ * The prompts and the digests were already being copied; the goal was not, so a
+ * resume that mints a new session id kept the history of an objective the
+ * session no longer had — and the `<bandaid-active-goal>` block SessionStart
+ * emits for exactly this case could never fire.
+ *
+ * Only an active goal moves. A completed or blocked one is history, and
+ * re-arming a stop that has already been settled is worse than losing it.
+ */
+function adoptGoal(sessionId, previousSessionId) {
+  const goal = store.readGoal(previousSessionId);
+  if (!goal || goal.status !== 'active' || !goal.objective) return false;
+  // Never overwrite: a goal already here won the race and is the live one.
+  if (store.readGoal(sessionId)) return false;
+  store.writeGoal(sessionId, goal);
   return true;
 }
 
@@ -90,6 +111,7 @@ function batchesForTurn(sessionId, turnIndex) {
 }
 
 module.exports = {
+  adoptGoal,
   adoptPreviousLedger,
   backfillFromTranscript,
   batchesForTurn,

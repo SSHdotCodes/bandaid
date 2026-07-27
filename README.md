@@ -331,7 +331,8 @@ Bandaid's off and use the native one if you prefer.
 | `/bandaid:verify` | Run the check and the judge now, and show the verdict |
 
 The `bandaid` CLI has the same surface plus `install`, `uninstall`, `doctor`,
-`inspect`, `sessions`, `prompt`, `goal criteria`, `goal block`, and `on`/`off`.
+`inspect`, `sessions`, `sessions prune`, `prompt`, `goal criteria`, `goal block`,
+and `on`/`off`.
 `goal block <reason>` records one thing this environment cannot do and keeps the
 goal running; `goal blocked` gives up on the whole objective.
 
@@ -365,9 +366,19 @@ goal running; `goal blocked` gives up on the whole objective.
     "verifyTimeoutMs": 120000,      // ceiling for one check or one judge run
     "plateauLimit": 2,              // identical failures before giving up
     "blockerLimit": 2               // recorded blockers before giving up
+  },
+  "retention": {
+    "enabled": true,
+    "sessionMaxAgeDays": 30,        // drop session dirs untouched this long
+    "sessionMaxCount": 200,         // hard ceiling, newest kept
+    "sweepIntervalHours": 24        // how often SessionStart may sweep
   }
 }
 ```
+
+A session whose goal is still `active` is **never** pruned, whatever its age.
+That is the multi-day case, and deleting it is the failure the goal system
+exists to prevent.
 
 A check command is the cheapest large win here. With one attached, looping is
 safe — the loop cannot end on a false positive — which is why attaching one
@@ -448,6 +459,16 @@ the first compaction after install replays prompts from before Bandaid existed.
   slash commands do not pass `--session`, which means `/bandaid:goal-done` in
   one session can close the other's goal. Pass `--session <id>` explicitly, or
   keep one session per directory, until the pointer is per-session.
+- **A goal survives a resume, not a fresh start.** `--resume` and `--fork` carry
+  the open objective, its criteria, its constraints and its recorded blockers
+  into the new session, along with the prompt ledger. A plain `claude` in the
+  same directory tomorrow deliberately inherits **nothing** — a fresh session
+  must not replay another conversation's instructions — so a genuinely
+  multi-day objective currently needs `--resume`. Project-scoped goals that a
+  new session can adopt on purpose are the next thing to build.
+- **Nothing was ever deleted before now.** Retention is on by default and sweeps
+  at most once a day from `SessionStart`; `bandaid sessions prune --dry-run`
+  shows what it would take first.
 - **Tested against Claude Code 2.1.220.** Hook input field names are product
   internals and could change; `bandaid doctor` and the end-to-end tests are how
   you find out.
@@ -457,7 +478,7 @@ the first compaction after install replays prompts from before Bandaid existed.
 ## Development
 
 ```bash
-npm test          # 145 tests, no dependencies, no network
+npm test          # 166 tests, no dependencies, no network
 npm run eval      # measures the judge against fixtures; needs `claude` on PATH
 node bin/bandaid.js doctor
 ```

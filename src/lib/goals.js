@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const { looksLikeCorrection } = require('./restore');
 const store = require('./store');
@@ -79,6 +80,34 @@ function resolveMaxContinuations(config, goal = null) {
   return typeof resolved === 'number' ? resolved : DEFAULT_CONTINUATIONS.unverified;
 }
 
+/**
+ * The commit the goal started from.
+ *
+ * One field, and it is the join key for everything that needs to ask "what did
+ * *this work* change?" rather than "what does the repository contain?" — a diff
+ * to scan for secrets, a set of paths to decide which verifiers apply, a scope
+ * to enforce, a base to check out. None of it can be backfilled: by the time
+ * you want the answer, the work has already happened.
+ *
+ * Returns null outside a git repository, which every consumer must treat as
+ * "cannot tell" rather than "nothing changed".
+ */
+function baseSha(cwd) {
+  try {
+    const result = spawnSync('git', ['rev-parse', 'HEAD'], {
+      cwd: cwd || process.cwd(),
+      encoding: 'utf8',
+      timeout: 2000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    if (result.error || result.status !== 0) return null;
+    const sha = String(result.stdout || '').trim();
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
 function cliPath() {
   return path.join(__dirname, '..', '..', 'bin', 'bandaid.js');
 }
@@ -142,12 +171,22 @@ function extractConstraints(objective) {
 
 function newGoal(
   objective,
-  { source = 'auto', maxContinuations = 2, tokenBudget = null, turnIndex = 0, check = null, criteria = [] } = {},
+  {
+    source = 'auto',
+    maxContinuations = 2,
+    tokenBudget = null,
+    turnIndex = 0,
+    check = null,
+    criteria = [],
+    cwd = null,
+  } = {},
 ) {
   const now = new Date().toISOString();
   const normalized = normalizeCriteria(criteria);
   return {
     objective: String(objective).trim(),
+    // The commit this goal started from. See baseSha().
+    baseSha: baseSha(cwd),
     // What must not happen, kept apart from what must. See extractConstraints.
     constraints: extractConstraints(objective),
     // What "done" means, fixed once and re-injected verbatim every turn.
@@ -398,6 +437,7 @@ module.exports = {
   MUTATING_TOOLS,
   TERMINAL_STATUSES,
   addBlocker,
+  baseSha,
   blockCommand,
   blockedOut,
   closeGoal,

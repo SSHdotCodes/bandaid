@@ -352,6 +352,83 @@ describe('session isolation', () => {
   });
 });
 
+describe('hook wiring', () => {
+  // The plugin path reads hooks/hooks.json; `bandaid install` writes settings.json
+  // from install.js. They disagreed on two timeouts once, and the only symptom
+  // was that the two install paths behaved differently under load.
+  it('the plugin manifest and the installer agree on every event and timeout', () => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks;
+    const { HOOK_EVENTS } = require(path.join(ROOT, 'src', 'lib', 'install.js'));
+
+    assert.deepEqual(
+      Object.keys(manifest).sort(),
+      HOOK_EVENTS.map((spec) => spec.event).sort(),
+      'both install paths must wire the same events',
+    );
+
+    for (const spec of HOOK_EVENTS) {
+      const [entry] = manifest[spec.event];
+      assert.equal(entry.hooks[0].timeout, spec.timeout, `${spec.event} timeout must match`);
+      assert.ok(entry.hooks[0].command.includes(spec.file), `${spec.event} must point at ${spec.file}`);
+    }
+  });
+
+  it('gives the Stop hook more time than the verifier it has to run', () => {
+    const { HOOK_EVENTS } = require(path.join(ROOT, 'src', 'lib', 'install.js'));
+    const { DEFAULTS } = require(path.join(ROOT, 'src', 'lib', 'config.js'));
+    const stop = HOOK_EVENTS.find((spec) => spec.event === 'Stop');
+
+    assert.ok(
+      stop.timeout * 1000 > DEFAULTS.goals.verifyTimeoutMs,
+      'a Stop hook killed mid-verdict does not exit 2, so the stop goes through unverified',
+    );
+  });
+});
+
+describe('goals across a resume', () => {
+  // A directory of its own: the per-cwd pointer is what a resume adopts
+  // through, and the lifecycle suites above have already claimed ROOT's.
+  const WORKDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bandaid-resume-'));
+  after(() => fs.rmSync(WORKDIR, { recursive: true, force: true }));
+
+  const DAY_ONE = 'e2e-resume-day-one';
+  const DAY_TWO = 'e2e-resume-day-two';
+  const OBJECTIVE = 'Port the retry logic to the new client without touching vendor/';
+
+  it('carries an open objective, its criteria, constraints and blockers into the new session', () => {
+    runHook('user-prompt-submit.js', { session_id: DAY_ONE, cwd: WORKDIR, prompt: OBJECTIVE });
+    cli(['goal', 'criteria', '--session', DAY_ONE, '--', 'retries use exponential backoff', 'retryLegacy is gone']);
+    cli(['goal', 'block', '--session', DAY_ONE, '--', 'the staging endpoint needs a VPN this session cannot reach']);
+
+    const resumed = runHook('session-start.js', { session_id: DAY_TWO, cwd: WORKDIR, source: 'resume' });
+
+    assert.equal(resumed.code, 0);
+    assert.ok(
+      fs.existsSync(path.join(HOME, 'sessions', DAY_TWO, 'goal.json')),
+      'the goal must travel with the ledger, or the resumed session has the history of an objective it no longer has',
+    );
+
+    assert.ok(resumed.stdout.includes(OBJECTIVE), 'the objective is restated');
+    assert.ok(resumed.stdout.includes('retries use exponential backoff'), 'the fixed bar travels with it');
+    assert.ok(resumed.stdout.includes('vendor/'), 'the constraint travels with it');
+    assert.ok(resumed.stdout.includes('needs a VPN'), 'so does what was already ruled impossible');
+    assert.ok(resumed.stdout.includes('do not re-argue them'), 'and it is marked as settled, not as a task');
+  });
+
+  it('does not resurrect an objective that was already closed', () => {
+    const closed = 'e2e-resume-closed';
+    cli(['goal', 'complete', '--session', DAY_TWO]);
+    runHook('session-start.js', { session_id: closed, cwd: WORKDIR, source: 'resume' });
+
+    const goal = JSON.parse(fs.readFileSync(path.join(HOME, 'sessions', DAY_TWO, 'goal.json'), 'utf8'));
+    assert.equal(goal.status, 'complete');
+    assert.ok(
+      !fs.existsSync(path.join(HOME, 'sessions', closed, 'goal.json')),
+      're-arming a stop that has already been settled is worse than losing it',
+    );
+  });
+});
+
 describe('hook robustness', () => {
   it('survives empty, malformed, and hostile input without failing the session', () => {
     for (const script of ['user-prompt-submit.js', 'post-tool-batch.js', 'pre-compact.js', 'post-compact.js', 'session-start.js', 'stop.js']) {

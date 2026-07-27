@@ -243,3 +243,19 @@ describe('blockers', () => {
     assert.equal(goal.blockedStreak, 0);
   });
 });
+
+describe('baseSha', () => {
+  it('records the commit a goal starts from, so later work can be diffed against it', () => {
+    const goal = newGoal('Port the retry logic', { cwd: require('node:path').resolve(__dirname, '..') });
+    assert.match(goal.baseSha, /^[0-9a-f]{40}$/, 'this repo is a git worktree, so there is a HEAD to record');
+  });
+
+  it('is null rather than a guess outside a repository', () => {
+    const goal = newGoal('Port the retry logic', { cwd: require('node:os').tmpdir() });
+    assert.equal(goal.baseSha, null, 'consumers must read this as "cannot tell", never as "nothing changed"');
+  });
+
+  it('never throws on a cwd that does not exist', () => {
+    assert.doesNotThrow(() => newGoal('x', { cwd: '/nope/not/here' }));
+  });
+});

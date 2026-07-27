@@ -58,9 +58,6 @@ const DEFAULTS = {
     // Skip the completion audit for turns that changed nothing.
     skipTrivialTurns: true,
 
-    // Consecutive turns reporting the same blocker before "blocked" is allowed.
-    blockedThreshold: 3,
-
     // Shell command that proves the objective is done. Exit 0 closes the goal;
     // any other status vetoes the stop no matter how finished the model feels.
     // Set per goal with `bandaid goal set ... --check`, or globally here.
@@ -88,6 +85,20 @@ const DEFAULTS = {
     // work that keeps failing the same way, but work this environment cannot do
     // at all, which no number of further turns changes.
     blockerLimit: 2,
+  },
+
+  // Nothing here has ever been deleted: one directory per session, forever,
+  // and a turns.jsonl that reaches megabytes in a day. A session with an active
+  // goal is exempt from all of it — that is the long-horizon case, and losing
+  // it is the failure the goal system exists to prevent.
+  retention: {
+    enabled: true,
+    // Sessions untouched for this long are dropped.
+    sessionMaxAgeDays: 30,
+    // Hard ceiling regardless of age, newest kept.
+    sessionMaxCount: 200,
+    // How often the automatic sweep is allowed to run, in hours.
+    sweepIntervalHours: 24,
   },
 
   debug: false,

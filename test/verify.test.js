@@ -255,3 +255,38 @@ describe('judgePrompt', () => {
     assert.doesNotMatch(prompt, /Use "violated"/);
   });
 });
+
+describe('blockersSection', () => {
+  const { blockersSection } = require('../src/lib/prompts');
+
+  it('renders nothing when nothing is blocked', () => {
+    assert.equal(blockersSection(newGoal('x')), '');
+  });
+
+  it('states the blockers as settled, not as remaining work', () => {
+    const text = blockersSection({ blockers: ['the printer is not attached'], blockedStreak: 1 });
+    assert.match(text, /do not re-argue them/);
+    assert.match(text, /the printer is not attached/);
+  });
+
+  it('says so when the same wall has been reported twice', () => {
+    // blockedStreak counts reports; blockers holds the distinct ones, so a gap
+    // between them is the loop circling one thing rather than spreading out.
+    const text = blockersSection({
+      blockers: ['the printer is not attached'],
+      blockedStreak: 2,
+      lastBlocker: 'the printer is not attached',
+    });
+    assert.match(text, /more than once/);
+    assert.match(text, /Work something else/);
+  });
+
+  it('stays quiet when two different things are blocked', () => {
+    const text = blockersSection({
+      blockers: ['no printer', 'no GPU'],
+      blockedStreak: 2,
+      lastBlocker: 'no GPU',
+    });
+    assert.doesNotMatch(text, /more than once/);
+  });
+});

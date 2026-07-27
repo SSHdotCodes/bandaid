@@ -22,5 +22,10 @@ Do this now:
 
    Each one states a condition that will be observably true when the objective is met — a command that exits 0, a file that exists and contains something specific, a behaviour that can be checked. Cover the objective as written and nothing more: criteria that quietly narrow it become the new, smaller goal, because from here on this list is the bar for both you and any reviewer. They are fixed once, so get them right rather than fast.
 4. Confirm to the user in one line that the goal is active, and show the criteria. If a check was set, say the goal closes automatically the moment that command exits 0. If not, say Bandaid will block the end of a turn until the completion audit passes or the continuation budget runs out.
+5. Bandaid also pulls the objective's negative clauses out as constraints, and hands them to any reviewer as vetoes. That extraction is a regex and it both over- and under-matches, so show the user what it actually found:
+
+   `node "${CLAUDE_PLUGIN_ROOT}/bin/bandaid.js" goal show`
+
+   Relay the `constraints:` lines verbatim, or say plainly that none were extracted. A constraint the user meant and Bandaid did not find is worth knowing now, while the goal is one command from being reset — not three turns later when a reviewer fails to veto something.
 
 Then begin working on the objective.

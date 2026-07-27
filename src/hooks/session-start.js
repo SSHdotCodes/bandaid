@@ -17,7 +17,35 @@ const goals = require('../lib/goals');
 const ledger = require('../lib/ledger');
 const store = require('../lib/store');
 const { buildRestoreBlock } = require('../lib/restore');
+const { blockersSection, constraintsSection } = require('../lib/prompts');
 const { emit, runHook } = require('../lib/hookio');
+
+/**
+ * Drop session directories nothing will read again, at most once a day.
+ *
+ * SessionStart is the right place: it is the one hook that fires when nothing
+ * is waiting on it, and its budget is 30s rather than the 10s the per-turn
+ * hooks get. Failures are swallowed — a sweep that cannot run is untidiness,
+ * not a reason to cost the user a session.
+ */
+function sweepIfDue(config) {
+  const retention = config.retention || {};
+  if (retention.enabled === false) return;
+
+  const intervalMs = (retention.sweepIntervalHours ?? 24) * 60 * 60 * 1000;
+  const last = Date.parse(store.readState().lastSweepAt || '') || 0;
+  if (Date.now() - last < intervalMs) return;
+
+  try {
+    store.updateState({ lastSweepAt: new Date().toISOString() });
+    store.pruneSessions({
+      maxAgeDays: retention.sessionMaxAgeDays ?? 30,
+      maxCount: retention.sessionMaxCount ?? 200,
+    });
+  } catch {
+    /* nothing here is worth failing a session over */
+  }
+}
 
 runHook('SessionStart', ({ input, config }) => {
   const sessionId = input.session_id;
@@ -25,6 +53,8 @@ runHook('SessionStart', ({ input, config }) => {
 
   const source = input.source || 'startup';
   const cwd = input.cwd || process.cwd();
+
+  sweepIfDue(config);
 
   // Capture who was driving this directory before we claim it, so a fork still
   // knows which ledger to inherit.
@@ -61,6 +91,13 @@ runHook('SessionStart', ({ input, config }) => {
           ...((goal.criteria || []).length
             ? ['', 'It is done when all of these are true, and not before:', ...goal.criteria.map((t, i) => `${i + 1}. ${t}`)]
             : []),
+          // The negative half and the walls travel with the objective. A resumed
+          // session that remembers only what to build re-attempts work already
+          // recorded as impossible, and breaks the one thing it was told to
+          // leave alone. Both sections render to '' when there is nothing to
+          // say, so they are spread rather than pushed.
+          ...(constraintsSection(goal) ? [constraintsSection(goal).trimEnd()] : []),
+          ...(blockersSection(goal) ? [blockersSection(goal).trimEnd()] : []),
           '',
           'Verify current state before assuming any of it is already done.',
           '</bandaid-active-goal>',

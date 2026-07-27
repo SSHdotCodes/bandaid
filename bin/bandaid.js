@@ -7,6 +7,7 @@ const path = require('node:path');
 const config = require('../src/lib/config');
 const goals = require('../src/lib/goals');
 const install = require('../src/lib/install');
+const ledger = require('../src/lib/ledger');
 const store = require('../src/lib/store');
 const verify = require('../src/lib/verify');
 const { buildRestoreBlock } = require('../src/lib/restore');
@@ -79,6 +80,8 @@ Usage: bandaid <command> [options]
   preview [--session ID]     Print exactly what would be injected after a compaction
   prompt                     Print the compaction prompt Bandaid installs
   sessions                   List sessions with a ledger
+  sessions prune             Delete old session dirs (never one with an active goal)
+                             [--older-than <days>] [--keep <n>] [--dry-run]
 
 Options:
   --session ID    Target a specific session (defaults to the live one)
@@ -147,6 +150,21 @@ function cmdDoctor(flags) {
   const installed = install.installedEvents({ scope: flags.scope || 'user' });
   if (installed.length && installed.length < install.HOOK_EVENTS.length) {
     problems.push(`settings.json has only ${installed.length}/${install.HOOK_EVENTS.length} Bandaid hooks; re-run "bandaid install"`);
+  }
+
+  // The Stop hook's budget and the verifier's budget live in different files,
+  // and a user who raises one will not think about the other. When the hook is
+  // the tighter of the two, Claude Code kills the verdict mid-flight — and a
+  // killed hook is not exit 2, so the stop goes through unverified. That is the
+  // one failure this whole loop must not have, so it is worth naming here.
+  const stopHook = install.HOOK_EVENTS.find((spec) => spec.event === 'Stop');
+  const verifyMs = config.loadConfig().goals.verifyTimeoutMs ?? verify.DEFAULT_TIMEOUT_MS;
+  if (stopHook && stopHook.timeout * 1000 <= verifyMs) {
+    problems.push(
+      `Stop hook timeout (${stopHook.timeout}s) does not clear goals.verifyTimeoutMs (${Math.round(verifyMs / 1000)}s); a slow verifier will be killed and the stop will go through unverified`,
+    );
+  } else if (stopHook) {
+    notes.push(`Stop budget ${stopHook.timeout}s clears verifyTimeoutMs ${Math.round(verifyMs / 1000)}s`);
   }
 
   for (const note of notes) out(`  ok    ${note}`);
@@ -227,6 +245,7 @@ function cmdGoal(positional, flags) {
       }
       const cfg = config.loadConfig();
       const check = typeof flags.check === 'string' ? flags.check : null;
+      const cwd = flags.cwd || process.cwd();
       goals.setGoal(sessionId, objective, {
         source: 'explicit',
         // Resolved with the check in hand, so `--check` earns the longer leash
@@ -235,7 +254,13 @@ function cmdGoal(positional, flags) {
           ? Number(flags['max-continuations'])
           : goals.resolveMaxContinuations(cfg, { check }),
         tokenBudget: flags.budget ? Number(flags.budget) : null,
+        // Scope the goal to the work that follows it. Without this an explicit
+        // goal gets turnIndex 0 and `turnsForGoal` sweeps the whole session, so
+        // both the token estimate and the judge's evidence include work that
+        // predates the objective.
+        turnIndex: ledger.currentTurnIndex(sessionId),
         check,
+        cwd,
       });
       out(`Goal set for session ${sessionId}.`);
       if (typeof flags.check === 'string') {
@@ -413,7 +438,25 @@ function cmdPrompt() {
   out(COMPACTION_FIDELITY_ADDENDUM);
 }
 
-function cmdSessions() {
+function cmdSessions(positional, flags) {
+  if ((positional[0] || '') === 'prune') {
+    const retention = config.loadConfig().retention || {};
+    const result = store.pruneSessions({
+      maxAgeDays: flags['older-than'] ? Number(flags['older-than']) : (retention.sessionMaxAgeDays ?? 30),
+      maxCount: flags.keep ? Number(flags.keep) : (retention.sessionMaxCount ?? 200),
+      dryRun: flags['dry-run'] === true || flags['dry-run'] === 'true',
+    });
+    if (!result.removed.length) {
+      out(`Nothing to prune. ${result.kept} session(s) kept.`);
+      return;
+    }
+    out(`${result.dryRun ? 'Would remove' : 'Removed'} ${result.removed.length} session(s); ${result.kept} kept.`);
+    for (const id of result.removed) out(`  ${id}`);
+    out('');
+    out('Sessions with an active goal are never pruned.');
+    return;
+  }
+
   let entries;
   try {
     entries = fs.readdirSync(store.sessionsDir(), { withFileTypes: true });
@@ -478,7 +521,7 @@ function main(argv) {
     case 'prompt':
       return cmdPrompt();
     case 'sessions':
-      return cmdSessions();
+      return cmdSessions(positional, flags);
     default:
       fail(`unknown command "${command}". Run "bandaid help".`);
   }
