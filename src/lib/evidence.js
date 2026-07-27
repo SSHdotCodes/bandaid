@@ -122,11 +122,21 @@ function coverage(entries, criteriaCount, currentStamp) {
     const mine = entries.filter((r) => r.criterion === i);
     const fresh = mine.filter((r) => stampMatches(r.stamp, currentStamp));
 
+    const measuredRefuted = fresh.find((r) => MEASURED_KINDS.has(r.kind) && r.verdict === 'refuted');
+    const measuredSupported = fresh.find((r) => MEASURED_KINDS.has(r.kind) && r.verdict === 'supported');
+
     let state = 'uncovered';
     let by = null;
-    if (fresh.some((r) => MEASURED_KINDS.has(r.kind) && r.verdict === 'refuted')) {
+    // Two verifiers looking at the same worktree and disagreeing. Usually a
+    // green check beside a failing probe on one criterion, and always the state
+    // where another blind attempt is worthless — nothing is unfinished, two
+    // measurements cannot both be right, and only finding out which resolves it.
+    if (measuredRefuted && measuredSupported) {
+      state = 'contradicted';
+      by = measuredRefuted;
+    } else if (measuredRefuted) {
       state = 'refuted';
-      by = fresh.find((r) => MEASURED_KINDS.has(r.kind) && r.verdict === 'refuted');
+      by = measuredRefuted;
     } else if (fresh.some((r) => MEASURED_KINDS.has(r.kind) && r.verdict === 'supported')) {
       state = 'covered';
       by = fresh.find((r) => MEASURED_KINDS.has(r.kind) && r.verdict === 'supported');
@@ -162,12 +172,14 @@ function summarize(entries, criteriaCount, currentStamp) {
 
   const parts = [];
   const covered = group('covered');
+  const contradicted = group('contradicted');
   const refuted = group('refuted');
   const claimed = group('claimed-only');
   const stale = group('stale');
   const uncovered = group('uncovered');
 
   if (covered) parts.push(`${covered} measured`);
+  if (contradicted) parts.push(`${contradicted} CONTRADICTED — two verifiers disagree`);
   if (refuted) parts.push(`${refuted} refuted`);
   if (claimed) parts.push(`${claimed} asserted but not measured`);
   if (stale) parts.push(`${stale} measured before the worktree changed`);

@@ -940,6 +940,8 @@ function cmdSelfCheck(flags) {
   const ADVICE = {
     covered: null,
     refuted: 'a verifier says this is not true right now — that is the thing to fix',
+    contradicted:
+      'two verifiers looking at the same worktree disagree. Another attempt is worthless until you find out which is right — read both records and their pointers.',
     'claimed-only': 'you asserted this; nothing measured it. Add a check, a probe, or an expectation that fails if it stops being true.',
     stale: 'this was measured before the worktree changed. Run it again.',
     uncovered: 'nothing has been recorded for this criterion at all.',

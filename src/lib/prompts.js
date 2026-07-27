@@ -210,6 +210,17 @@ ${circling}`;
  * "Claude stopped for no reason" failure: the model does not get to end a turn
  * on a plausible-looking partial result, and completion has to be proven
  * against current state rather than asserted from memory.
+ *
+ * ponytail: the completion audit below is ~277 words asking the model to grade
+ * its own work honestly, and it is the largest compensator in this codebase.
+ * By the Bitter-Lesson test — would a 2x better model need this? — it is the
+ * first thing that should stop being necessary. The mechanical version now
+ * exists: `bandaid self-check` computes coverage from the evidence ledger, and
+ * the one-line summary above reports it. Cut these paragraphs to their first
+ * and last sentence once `npm run eval -- --ablate completion-audit` shows
+ * precision unchanged without them. Do not cut them before that: they are
+ * probably load-bearing today, and guessing is what built a 678-word prompt in
+ * the first place. Reviewed 2026-07-28.
  */
 function continuationPrompt(
   goal,

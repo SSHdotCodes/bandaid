@@ -413,6 +413,41 @@ under-matches. Declared paths turn *"do NOT touch the billing module"* into
 `baseSha..HEAD` minus a glob list — set membership, not a paragraph asking the
 model to remember. Out-of-scope changes block the stop and are named.
 
+### Self-check: the completion audit, computed
+
+`src/lib/prompts.js` spends 277 words asking the model to grade each criterion
+honestly and to treat *absence of contradiction* as *absence of proof*. It is
+the largest compensator in the codebase, and by the Bitter-Lesson test it is the
+first thing that should stop being necessary.
+
+`bandaid self-check` is the mechanical version — arithmetic over a ledger the
+model can only append **unverified** claims to, so the answer is not up for
+negotiation:
+
+```
+coverage: 2 of 4 criteria have measured, current evidence.
+
+  1. src/client.js retries with exponential backoff
+     covered — check `npm test` exited 0
+  2. src/client.js no longer references retryLegacy
+     claimed-only — you asserted this; nothing measured it.
+     Add a check, a probe, or an expectation that fails if it stops being true.
+  3. the checkout flow works at 375px
+     refuted — probe `browser`: horizontal overflow at 375px
+  4. the migration is idempotent
+     uncovered — nothing has been recorded for this criterion at all.
+```
+
+A fifth state matters more than it looks: **contradicted**, when two verifiers
+looking at the same worktree disagree — a green check beside a failing probe on
+one criterion. That is precisely where another blind attempt is worthless.
+Nothing is unfinished; two measurements cannot both be right; only finding out
+which resolves it.
+
+The audit paragraphs stay for now, with a dated sunset note. They are probably
+load-bearing today, and `npm run eval -- --ablate completion-audit` is how that
+stops being a guess rather than something to act on early.
+
 ### Blockers: the difference between "not yet" and "not from here"
 
 A loop that only knows *unfinished* treats "the tests don't pass yet" and "proving
@@ -565,6 +600,9 @@ Bandaid's off and use the native one if you prefer.
 | `/bandaid:goal-status` | Show the objective, its check, and its continuation budget |
 | `/bandaid:goal-done` | Close the objective |
 | `/bandaid:verify` | Run the check and the judge now, and show the verdict |
+| `/bandaid:probe` | What each probe last said about the current worktree |
+| `/bandaid:self-check` | Which criteria have measured evidence, and which are only asserted |
+| `/bandaid:goal-resume` | Take up the objective this project left open |
 
 The `bandaid` CLI has the same surface plus `install`, `uninstall`, `doctor`,
 `inspect`, `sessions`, `sessions prune`, `prompt`, `goal criteria`, `goal block`,
@@ -742,7 +780,7 @@ the first compaction after install replays prompts from before Bandaid existed.
 ## Development
 
 ```bash
-npm test          # 302 tests, no dependencies, no network
+npm test          # 304 tests, no dependencies, no network
 npm run eval      # measures the judge against fixtures; needs `claude` on PATH
 node bin/bandaid.js doctor
 ```

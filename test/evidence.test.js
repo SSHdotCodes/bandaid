@@ -183,12 +183,31 @@ describe('coverage', () => {
     assert.equal(result[0].state, 'stale', 'Monday\'s proof says nothing about Thursday\'s worktree');
   });
 
-  it('lets a refutation outrank a passing record on the same criterion', () => {
+  it('calls two verifiers disagreeing a contradiction, not a refutation', () => {
+    // A green check beside a failing probe on one criterion is the state where
+    // another blind attempt is worthless: nothing is unfinished, two
+    // measurements cannot both be right, and only finding out which resolves it.
     const result = rows([
       { criterion: 1, kind: 'check', verdict: 'supported', stamp: 'now' },
       { criterion: 1, kind: 'probe', verdict: 'refuted', stamp: 'now' },
     ]);
-    assert.equal(result[0].state, 'refuted');
+    assert.equal(result[0].state, 'contradicted');
+  });
+
+  it('is an ordinary refutation when nothing measured supports it', () => {
+    const result = rows([
+      { criterion: 1, kind: 'claim', verdict: 'unverified', stamp: 'now' },
+      { criterion: 1, kind: 'probe', verdict: 'refuted', stamp: 'now' },
+    ]);
+    assert.equal(result[0].state, 'refuted', 'an engineer claim is not a measurement to contradict');
+  });
+
+  it('does not call a stale pass and a fresh failure a contradiction', () => {
+    const result = rows([
+      { criterion: 1, kind: 'check', verdict: 'supported', stamp: 'then' },
+      { criterion: 1, kind: 'probe', verdict: 'refuted', stamp: 'now' },
+    ]);
+    assert.equal(result[0].state, 'refuted', 'they describe different worktrees, so they do not disagree');
   });
 });
 
