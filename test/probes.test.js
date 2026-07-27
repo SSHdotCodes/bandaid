@@ -294,3 +294,74 @@ describe('probes and the autonomy slider', () => {
     assert.equal(verifierStrength(DEFAULTS, { probes: [] }), 'unverified');
   });
 });
+
+describe('the detached runner', () => {
+  const RUNNER = path.join(__dirname, '..', 'src', 'lib', 'probe-runner.js');
+
+  function runRunner(dir, id, stamp = 'test-stamp') {
+    return require('node:child_process').spawnSync(
+      process.execPath,
+      [RUNNER, '--probe', id, '--cwd', dir, '--stamp', stamp],
+      { encoding: 'utf8', timeout: 30000, env: { ...process.env, BANDAID_HOME: HOME } },
+    );
+  }
+
+  it('writes the verdict where the next Stop will read it, and lets the lock go', () => {
+    const dir = repo(one('ok'), { 'ok.js': 'console.log(JSON.stringify({summary:"all clear"}));process.exit(0)' });
+    probes.takeLock(dir, 'ok', 'test-stamp');
+
+    runRunner(dir, 'ok');
+
+    const cached = probes.readCache(dir, 'ok');
+    assert.equal(cached.verdict, 'pass');
+    assert.equal(cached.stamp, 'test-stamp', 'the verdict is attributed to the worktree it measured');
+    assert.equal(cached.summary, 'all clear');
+    assert.equal(probes.lockState(dir, 'ok', 600000).held, false, 'a held lock reads as still-in-flight forever');
+  });
+
+  it('records a failure as a failure rather than leaving no answer', () => {
+    const dir = repo(one('bad'), { 'bad.js': 'process.exit(3)' });
+    runRunner(dir, 'bad');
+
+    const cached = probes.readCache(dir, 'bad');
+    assert.equal(cached.verdict, 'fail');
+    assert.equal(cached.exitCode, 3);
+  });
+
+  it('records an abstention, so the summons is available to report', () => {
+    const dir = repo(
+      { probes: [{ id: 'none', run: 'node .bandaid/probes/none.js', summons: 'bandaid-browser-verify' }] },
+      { 'none.js': 'console.error("no driver");process.exit(78)' },
+    );
+    runRunner(dir, 'none');
+
+    const cached = probes.readCache(dir, 'none');
+    assert.equal(cached.verdict, 'abstain');
+    assert.equal(cached.summons, 'bandaid-browser-verify');
+  });
+
+  it('releases the lock and writes nothing when the probe is not in the manifest', () => {
+    const dir = repo(one('ok'), { 'ok.js': 'process.exit(0)' });
+    probes.takeLock(dir, 'ghost', 'test-stamp');
+
+    runRunner(dir, 'ghost');
+
+    assert.equal(probes.readCache(dir, 'ghost'), null);
+    assert.equal(probes.lockState(dir, 'ghost', 600000).held, false, 'a probe deleted from the manifest must not wedge');
+  });
+
+  it('never exits non-zero, because nothing is waiting on it', () => {
+    const dir = repo(one('bad'), { 'bad.js': 'process.exit(1)' });
+    assert.equal(runRunner(dir, 'bad').status, 0, 'the verdict goes in the file, not in this exit code');
+  });
+
+  it('leaves no lock behind even when the probe itself dies', () => {
+    const dir = repo(one('boom'), { 'boom.js': 'throw new Error("kaboom")' });
+    probes.takeLock(dir, 'boom', 'test-stamp');
+
+    runRunner(dir, 'boom');
+
+    assert.equal(probes.lockState(dir, 'boom', 600000).held, false);
+    assert.equal(probes.readCache(dir, 'boom').verdict, 'fail');
+  });
+});

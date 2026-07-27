@@ -780,7 +780,7 @@ the first compaction after install replays prompts from before Bandaid existed.
 ## Development
 
 ```bash
-npm test          # 306 tests, no dependencies, no network
+npm test          # 324 tests, no dependencies, no network
 npm run eval      # measures the judge against fixtures; needs `claude` on PATH
 node bin/bandaid.js doctor
 ```
