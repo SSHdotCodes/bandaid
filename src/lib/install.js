@@ -22,7 +22,9 @@ const MARKER = 'bandaid';
  * Must stay byte-for-byte in step with `hooks/hooks.json`, which is what the
  * plugin install path uses. They disagreed once — 20s here against 30s there —
  * and the two install paths silently produced different behaviour under a slow
- * restore. `test/install.test.js` now asserts they agree.
+ * restore. `test/hooks.e2e.test.js` asserts they agree on every event *and*
+ * timeout — the comment previously named `test/install.test.js`, which does not
+ * exist and never has.
  *
  * The Stop budget has to clear the slowest verifier it can run. The judge is
  * measured at 12–16s and `goals.verifyTimeoutMs` defaults to 120s, so a 15s

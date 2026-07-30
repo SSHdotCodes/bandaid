@@ -254,6 +254,16 @@ function assess({ goal, config, cwd, turns = [], spawn = {}, record = false } = 
   const judgeEnabled = settings.judge === true;
 
   const ledger = record ? ledgerFor(goal, cwd) : { text: '', record: () => {} };
+  // Deliberately short. This goes into a one-line reason that is compared for
+  // equality across rounds and stored on the goal; the full output already reaches
+  // the model through `verification.output`.
+  const firstLine = (text) => {
+    const line = String(text || '')
+      .split('\n')
+      .map((l) => l.trim())
+      .find(Boolean);
+    return line ? line.slice(0, 120) : '';
+  };
   const check = (spawn.runCheck || runCheck)(command, { cwd, timeoutMs });
 
   // Ground truth outranks every opinion, including the judge's. If the command
@@ -268,7 +278,17 @@ function assess({ goal, config, cwd, turns = [], spawn = {}, record = false } = 
     });
     return {
       proven: false,
-      reason: `check failed: ${command}`,
+      // The output, not just the command. This looks cosmetic and is not: the
+      // reason is what plateauReached compares for byte-equality and what
+      // progress.detect compares for change. With only the command in it, the
+      // string is *constant* for a given goal, so the plateau breaker fired after
+      // any two consecutive failing rounds — killing a loop making visible
+      // progress — while "the verdict changed" could never fire at all.
+      //
+      // eval/loop.js caught this: a goal landing one of four stages per round,
+      // with the check output differing every round, was terminated at round 3
+      // before it could go green at round 4.
+      reason: `check failed: ${command}${check.output ? ` — ${firstLine(check.output)}` : ''}`,
       verification: { source: 'check', command, ok: false, output: check.output },
     };
   }

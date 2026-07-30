@@ -55,6 +55,56 @@ function evidenceSummaryFor(goal) {
   }
 }
 
+/**
+ * The wall-clock budget in force for this goal: its own, or the configured
+ * default. Resolved in one place because three call sites need to agree on it,
+ * which is the same reason `check` is resolved as `goal.check ?? config`.
+ */
+function resolvedTimeBudget(goal, config) {
+  return goal.timeBudgetMs ?? (config.goals || {}).timeBudgetMs ?? null;
+}
+
+/**
+ * How much longer this looks like taking, or null.
+ *
+ * Built from the task ledger and criteria coverage — both already computed
+ * elsewhere in this hook's work, neither of them the model's word for anything.
+ * Wrapped because an estimate is a nicety: a broken one must not cost a stop.
+ */
+function estimateRemaining(sessionId, goal) {
+  try {
+    const eta = require('../lib/eta');
+    return eta.estimate(goal, { taskState: taskStateFor(sessionId), coverage: coverageFor(goal) });
+  } catch {
+    return null;
+  }
+}
+
+/** The task ledger's state, or null. Never throws: it is an observation. */
+function taskStateFor(sessionId) {
+  try {
+    return require('../lib/tasks').state(sessionId);
+  } catch {
+    return null;
+  }
+}
+
+/** Criteria coverage from the project ledger, in the shape eta.js expects. */
+function coverageFor(goal) {
+  if (!goal.projectRoot || !(goal.criteria || []).length) return null;
+  try {
+    const evidence = require('../lib/evidence');
+    const { worktreeStamp } = require('../lib/stamp');
+    return evidence.coverage(
+      evidence.read(goal.projectRoot, { objectiveHash: evidence.objectiveHash(goal.objective) }),
+      goal.criteria.length,
+      worktreeStamp(goal.projectRoot),
+    );
+  } catch {
+    return null;
+  }
+}
+
 function estimateTokensUsed(turns) {
   let total = 0;
   for (const turn of turns) {
@@ -69,7 +119,20 @@ runHook('Stop', ({ input, config }) => {
   const sessionId = input.session_id;
   if (!store.sanitizeId(sessionId)) return 0;
 
+  // Read the clock once. Every elapsed figure in this hook's output derives from
+  // it, so a slow verification cannot make one line disagree with another.
+  const now = Date.now();
+
   const goal = goals.loadGoal(sessionId);
+
+  // Fold the transcript's real per-call durations into this project's profile.
+  // Stop is the first moment the entries for this turn's calls exist. It never
+  // throws and its result is not read here — a profile is a nicety, and a broken
+  // one must not cost a stop.
+  if (goal && goal.projectRoot) {
+    require('../lib/durations').sync(goal.projectRoot, input.transcript_path);
+  }
+
   const turnIndex = ledger.currentTurnIndex(sessionId);
   const recentBatches = ledger.batchesForTurn(sessionId, turnIndex);
 
@@ -79,6 +142,7 @@ runHook('Stop', ({ input, config }) => {
     stopHookActive: Boolean(input.stop_hook_active),
     recentBatches,
     lastAssistantMessage: input.last_assistant_message || '',
+    now,
   });
 
   if (decision.action === 'allow' || !decision.goal) return 0;
@@ -88,13 +152,14 @@ runHook('Stop', ({ input, config }) => {
   const cmd = goals.completeCommand(sessionId);
 
   if (decision.action === 'wrap-up') {
-    // Only an explicit token budget earns the extra wrap-up turn; a spent
-    // continuation cap just lets the stop through.
-    if (decision.goal.tokenBudget == null) {
-      goals.saveGoal(sessionId, { ...decision.goal, status: 'budget_limited', tokensUsed });
-      return 0;
-    }
+    // Only an explicit budget earns the extra wrap-up turn; a spent continuation
+    // cap just lets the stop through. A wall-clock budget counts as explicit for
+    // the same reason a token budget does — somebody set a number and deserves
+    // to be told it ran out.
+    const explicitBudget =
+      decision.goal.tokenBudget != null || resolvedTimeBudget(decision.goal, config) != null;
     goals.saveGoal(sessionId, { ...decision.goal, status: 'budget_limited', tokensUsed });
+    if (!explicitBudget) return 0;
     emitBlocking(budgetLimitPrompt({ ...decision.goal, tokensUsed }, { completeCommand: cmd }));
     return 2;
   }
@@ -180,14 +245,37 @@ runHook('Stop', ({ input, config }) => {
     return 2;
   }
 
+  // Did this round move the work, or only touch it? Anything the model can fake by
+  // editing a file does not count — see src/lib/progress.js for the ordering.
+  const progress = require('../lib/progress');
+  const coverage = coverageFor(decision.goal);
+  const taskState = taskStateFor(sessionId);
+  const verdict = progress.detect({
+    goal: decision.goal,
+    coverage,
+    taskState,
+    reason: assessment.reason,
+  });
+
   const updated = goals.saveGoal(sessionId, {
-    ...scored,
-    continuations: (scored.continuations || 0) + 1,
+    ...goals.recordContinuation(scored, now),
+    ...progress.settle({ goal: scored, ...verdict, now }),
+    // Snapshot what the next round compares against. Taken after settle so it
+    // cannot be read as this round's progress on the next one.
+    coveredCount: progress.coveredCount(coverage),
+    completedTasks: taskState ? taskState.completed : null,
     tokensUsed,
   });
 
   emitBlocking(
     continuationPrompt(updated, {
+      now,
+      timeBudgetMs: resolvedTimeBudget(updated, config),
+      eta: estimateRemaining(sessionId, updated),
+      askedPermission: Boolean(decision.askedPermission),
+      // Empty in every real run; eval/loop.js sets it to measure whether a block
+      // earns its tokens.
+      ablate: config.ablate || [],
       completeCommand: cmd,
       criteriaCommand: goals.criteriaCommand(sessionId),
       blockCommand: goals.blockCommand(sessionId),
