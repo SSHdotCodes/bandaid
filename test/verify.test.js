@@ -156,7 +156,38 @@ describe('continuationPrompt', () => {
 
   it('counts the first continuation as the first, not the last', () => {
     const goal = { ...newGoal('Ship it'), continuations: 1, maxContinuations: 2 };
-    assert.match(continuationPrompt(goal, opts), /Continuation: 1 of 2/);
+    assert.match(continuationPrompt(goal, opts), /continuation 1\/2/);
+  });
+
+  it('says nothing about a budget nobody set', () => {
+    // Three of the four lines this replaced said "none" or "unbounded" on the
+    // default configuration. Absent is cheaper and clearer than unbounded.
+    const goal = { ...newGoal('Ship it'), continuations: 1, maxContinuations: 2, startedAt: null, createdAt: null };
+    const text = continuationPrompt(goal, opts);
+    assert.doesNotMatch(text, /tokens/i);
+    assert.doesNotMatch(text, /unbounded/);
+    assert.match(text, /^Capacity: continuation 1\/2$/m);
+  });
+
+  it('tells the model when the leash was lengthened, and only then', () => {
+    // Three words, and they say the loop is being extended because the work is
+    // moving — information about its own situation nothing else conveys.
+    const earned = { ...newGoal('Ship it'), continuations: 3, maxContinuations: 8, refunded: 2 };
+    assert.match(continuationPrompt(earned, opts), /continuation 3\/8 \(2 earned\)/);
+
+    const none = { ...newGoal('Ship it'), continuations: 3, maxContinuations: 8, refunded: 0 };
+    assert.match(continuationPrompt(none, opts), /continuation 3\/8(?! \()/);
+  });
+
+  it('marks the estimate as one and leaves the measured figures unmarked', () => {
+    const goal = { ...newGoal('Ship it'), continuations: 2, maxContinuations: 4, tokenBudget: 50_000, tokensUsed: 12_000 };
+    const text = continuationPrompt(goal, {
+      ...opts,
+      eta: { remainingMs: 35 * 60_000, lowMs: 20 * 60_000, highMs: 70 * 60_000, basis: 'tasks', unitsRemaining: 7 },
+    });
+    assert.match(text, /~35m left \(7 tasks, 20m–1h 10m\)/);
+    assert.match(text, /~12000 of 50000 tokens/, 'the token figure is a floor, so it is marked too');
+    assert.match(text, /continuation 2\/4/, 'a counted figure carries no tilde');
   });
 
   it('puts a failed check above the audit and marks it external', () => {

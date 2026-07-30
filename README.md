@@ -127,13 +127,41 @@ worse than no stop hook:
 - `stop_hook_active` is honoured — Claude Code's own loop guard always wins.
 - A goal may block at most `maxContinuations` times, then gives up.
 - Turns that changed nothing (no `Edit`/`Write`/`Bash`/`Task`) are never audited.
-- If Claude ended its turn asking *you* a question, the stop is always allowed.
+- If Claude ended its turn asking *you* a question, the stop is allowed — always by
+  default, and unless it was asking permission to do work already in scope when
+  `goals.autonomy` is on (see below).
 - Two identical verification failures in a row end the loop early (see below).
 - Work this environment cannot do stops being asked for (see below).
+- A wall-clock budget, if you set one, wraps the goal up (see below).
 
-Worst case is two extra rounds on a goal the model cannot finish. Set
-`goals.mode` to `"explicit"` if you only want `/bandaid:goal` to arm it, or
+Set `goals.mode` to `"explicit"` if you only want `/bandaid:goal` to arm it, or
 `"off"` to disable it entirely.
+
+**The leash is earned, not fixed.** A flat number is still wrong in both directions
+on a large task: a goal making verified progress hits its cap mid-refactor, while a
+goal spinning on the same failure burns the whole cap doing it. So a round that
+moved the work is **refunded** — it costs nothing — and a round that moved nothing
+twice running costs **two**.
+
+That means the worst case is no longer "two extra rounds". It is `3 ×` the tier
+value in total rounds, spent plus refunded, and it is bounded on four other sides as
+well: the wall-clock budget, the token budget, the blocker limit, and
+`stop_hook_active`. A goal going nowhere now ends *sooner* than it did before any of
+this existed, because a stall costs double — which is what makes the mechanism safe
+to have on by default.
+
+**What counts as progress is the whole difficulty**, because a refund is a reward
+and any reward the model can pay itself gets paid. Ordered by how hard they are to
+fake:
+
+| signal | can the model fake it? |
+|---|---|
+| a criterion reached `covered` | no — that needs a check, probe, judge or expectation record, and `evidence.append` forces anything the model says to `unverified` |
+| the verification failure changed in substance | no — "3 tests failing" becoming "1 test failing" is a different state |
+| a task was completed | yes, it writes its own task list — so this buys **one** round per goal and no more |
+
+Deliberately absent: the worktree fingerprint. It moves on any tracked edit, which
+makes it exactly the signal not to reward. Editing a file is not progress.
 
 **The cap tracks how strong the verifier is.** Karpathy's rule for agents is to
 slide autonomy up as the verifier proves out, so a flat number is wrong in both
@@ -148,6 +176,110 @@ miserly for one that a shell command closes the moment it exits 0.
 
 `bandaid status` prints which tier you are in. A plain number in config still
 overrides all three.
+
+### The clock, and the third budget
+
+Bandaid could tell the model how many continuations it had left and roughly how
+many tokens it had spent. It could not tell it what time it was. Every record on
+disk carried a timestamp and nothing ever subtracted two of them, so a model four
+hours into an objective and one four minutes in read exactly the same prompt.
+
+The continuation prompt now carries a clock:
+
+```
+Elapsed:
+- Now: 16:42 (Thu 30 Jul)
+- This goal: 3h 18m of 6h
+- Since last progress: 11m
+```
+
+…and one line about what is actually scarce, in place of the four-line `Budget:`
+block that used to say `none` and `unbounded` on every default configuration:
+
+```
+Capacity: continuation 2/4 · 3h 18m of 6h · ~50m left (5 tasks, 45m–1h)
+```
+
+Anything unbounded is absent rather than rendered, which is how this added a
+wall-clock budget and an ETA and still took **15 words off every one of the ten
+continuation prompts — 150 in total**, with every ceiling in
+`test/prompts.snapshot.test.js` coming down rather than up.
+
+The four quantities are not of equal quality and the line says so. Elapsed is
+measured, continuations are counted, and anything with a `~` is not: `tokensUsed`
+is a floor (it sums digests already truncated to 900 tokens each), and the ETA is
+an estimate shown with the spread it came from.
+
+And wall-clock joins turns and tokens as a budget you can set:
+
+```bash
+bandaid goal set --time-budget 2h -- "Reconcile the two billing ledgers"
+```
+
+which wraps the goal up through the same path a spent token budget uses — one
+final turn to report, then the stop goes through. `90m`, `2h`, `1h30m` and plain
+milliseconds all parse; anything else is **rejected rather than guessed**, because
+a budget read wrongly caps the work at a number nobody chose and does it quietly.
+
+This is the third of the three budgets `best-goal-report.md` specified. Turns and
+tokens shipped; wall-clock did not, which left Bandaid one step behind the thing
+that report criticises Codex for — tracking elapsed time and never enforcing it.
+Bandaid was not even tracking it.
+
+**Two deliberate limits.** The clock renders only where Bandaid already spends
+tokens — a continuation, a compaction restore, and a `SessionStart` that had
+something to say anyway. A session with no goal and no compaction still injects
+nothing at all, because the zero-steady-state property is worth more than a clock
+on a turn where nothing is deciding anything. And elapsed time gates a *budget*,
+never *validity*: whether recorded evidence still describes the worktree stays
+content-hashed, for the reason `src/lib/stamp.js` gives — a TTL is wrong in both
+directions at once, and a fingerprint is exact.
+
+### Asking permission was an unconditional escape hatch
+
+Of the six ways the goal loop bounded itself, one was a line of punctuation
+counting: if the last non-blank line ended in `?`, the stop went through. So a turn
+ending *"Should I proceed?"* bypassed the completion audit, the fixed criteria, and
+every verifier tier.
+
+The reason that check exists is a good one — blocking a genuine question traps you
+in a loop where the question is never actually asked — so it is not removed, it is
+made to discriminate:
+
+```jsonc
+"goals": { "autonomy": true }   // off by default
+```
+
+With it on, a request for permission to do work already in scope no longer buys a
+stop, and gets one 57-word paragraph telling it to decide and say what it assumed.
+A genuine question — a credential, a choice it cannot rank, a value it cannot
+derive — still ends the turn, and so does anything the classifier does not
+recognise.
+
+**The two errors are not symmetric, and the threshold comes from that, not from
+accuracy.** Blocking a genuine question locks you out of a conversation you are
+needed in until the budget runs out. Allowing a permission-ask costs one early turn
+and a typed "continue" — it is the current behaviour. So the gate is that no
+genuine question is ever blocked, and uncertainty always resolves to the old
+behaviour, the same fail-open posture the judge takes when its verdict cannot be
+parsed.
+
+```
+$ npm run autonomy
+  corpus     26 cases (16 permission, 10 genuine)
+  GATE       genuine questions still allowed 10/10 (100%)
+  recall     permission-asks caught 15/16 (94%)  — not the gate
+  unknown    3 case(s) matched nothing and fell through to allow
+```
+
+The one miss is *"Should I do the tests first or the docs first?"* — choice phrasing
+around work that is entirely in scope. It costs a turn, which is the acceptable
+direction. The corpus's two hardest rows are the mirror pair: an offer that contains
+a real question (*"Would you like me to use the staging key, or do you have a
+production one?"* — genuine) and a choice that contains none (the miss above).
+
+It is off by default because it changes when Bandaid refuses to let a turn end, and
+every existing user would get that on upgrade.
 
 ### Acceptance criteria
 
@@ -596,7 +728,7 @@ Bandaid's off and use the native one if you prefer.
 |---|---|
 | `/bandaid:status` | Config, install state, what has been captured |
 | `/bandaid:preview` | Exactly what would be restored if you compacted now |
-| `/bandaid:goal <objective> [--check "<cmd>"]` | Set an explicit objective, optionally with a command that proves it done |
+| `/bandaid:goal <objective> [--check "<cmd>"]` | Set an explicit objective, optionally with a command that proves it done. `--time-budget 2h` caps its wall-clock |
 | `/bandaid:goal-status` | Show the objective, its check, and its continuation budget |
 | `/bandaid:goal-done` | Close the objective |
 | `/bandaid:verify` | Run the check and the judge now, and show the verdict |
@@ -605,7 +737,7 @@ Bandaid's off and use the native one if you prefer.
 | `/bandaid:goal-resume` | Take up the objective this project left open |
 
 The `bandaid` CLI has the same surface plus `install`, `uninstall`, `doctor`,
-`inspect`, `sessions`, `sessions prune`, `prompt`, `goal criteria`, `goal block`,
+`inspect`, `durations`, `tasks`, `sessions`, `sessions prune`, `prompt`, `goal criteria`, `goal block`,
 `goal adopt`, `goal history`, `goal expect`, `goal scope`, `probes list|trust`,
 `probe status|run|arm|disarm`, `self-check`, `evidence show|add`, and `on`/`off`.
 `goal block <reason>` records one thing this environment cannot do and keeps the
@@ -633,7 +765,9 @@ goal running; `goal blocked` gives up on the whole objective.
     // scales with the verifier; a plain number overrides all three tiers
     "maxContinuations": { "verified": 8, "judged": 4, "unverified": 2 },
     "tokenBudget": null,
+    "timeBudgetMs": null,           // wall-clock ceiling per goal
     "skipTrivialTurns": true,
+    "autonomy": false,              // a permission-ask still ends the turn
     "check": null,                  // shell command; exit 0 closes any goal
     "judge": false,                 // independent read-only verifier
     "judgeModel": "haiku",
@@ -661,6 +795,7 @@ raises the continuation cap on its own.
 
 Env overrides for one-off runs: `BANDAID_ENABLED`, `BANDAID_COMPACT`,
 `BANDAID_GOALS`, `BANDAID_GOAL_MODE`, `BANDAID_MAX_CONTINUATIONS`,
+`BANDAID_TIME_BUDGET`,
 `BANDAID_USER_MESSAGE_MAX_TOKENS`, `BANDAID_DIGEST_BUDGET_TOKENS`,
 `BANDAID_HOME`, `BANDAID_DEBUG`.
 
@@ -702,18 +837,109 @@ the first compaction after install replays prompts from before Bandaid existed.
   pass, not that the objective was met; that gap is what the judge is for, and
   the judge is a model too. Neither tier turns a vague objective into a
   verifiable one.
-- **The plateau breaker almost never fires.** It compares verification failures
-  for byte-equality after folding whitespace and case, which catches a check
-  command printing the same output twice and essentially nothing else. Replayed
-  against two real stuck loops of 7 and 4 consecutive blocks — 9 consecutive
-  pairs, every one of them a judge repeating itself in substance — **not one pair
-  was byte-identical, so it would have fired zero times.** A judge writes fresh
-  prose each round; token overlap between consecutive reasons sat around 0.2–0.7
-  depending on how much of the reason you compare, so there is no threshold that
-  separates "stuck" from "progressing" either. That is why this is documented
-  rather than replaced with a similarity metric. Blockers are what actually ends
-  a stuck loop early; the plateau breaker is a cheap backstop for the
-  check-command case, where the same output really does repeat verbatim.
+- **The plateau breaker fires, and until recently it fired far too eagerly.** This
+  entry used to say it "almost never fires" — replayed against two real stuck loops
+  it would have fired zero times, because a judge writes fresh prose each round and
+  token overlap between consecutive reasons sat at 0.2–0.7 with no threshold
+  separating "stuck" from "progressing". That replay is still the right result for
+  *judge*-graded loops, and no similarity metric has been added for them.
+
+  What it got wrong was the check-command case. The failure reason it compares
+  contained only the **command**, not the output — a constant for a given goal — so
+  it fired after any two consecutive failing check rounds regardless of progress.
+  `npm run loop` demonstrates the damage: a goal landing one of four pipeline
+  stages per round, reporting `only 1 of 4`, `only 2 of 4`, `only 3 of 4`, was
+  **terminated at round 3 before it could go green at round 4.** The reason now
+  carries the first line of the output, which is what the paragraph always claimed
+  it compared. On the loop fixtures it ends 3 of 4 stuck loops and no converging
+  ones.
+- **The stall rule never ends a loop.** `npm run loop` reports it `DEAD`: the
+  plateau breaker is checked first (`src/hooks/stop.js:242`, before
+  `progress.settle` at `:262`) and reaches its limit a round earlier on every stuck
+  fixture. The stall's double-cost still accelerates the budget; it simply never
+  wins the race. Whether it reaches anything plateau cannot is **unverified** — that
+  needs a judge-graded fixture, and the judge needs `claude` on `PATH`.
+- **A check with nondeterministic output buys refunds it did not earn.** Because
+  "the verdict changed" counts as progress, a suite that prints timings or
+  randomises order looks like it is advancing. On the `stalling-varied` fixture that
+  is 5 refunds across 6 rounds of pure churn. It stays bounded by the `3 ×` round
+  ceiling and the wall-clock budget, but "the output changed" is a weaker proxy for
+  progress than it reads as.
+- **An expectation can never make a criterion `covered`, though `expect` is listed
+  as a measured kind.** `bandaid goal expect` takes no `--criterion`, and
+  `verify.assess` writes an `expect` record only when one *fails*
+  (`verdict: 'refuted'`). So a passing expectation is invisible to
+  `evidence.coverage`, and `bandaid self-check` can only ever reach `covered` via a
+  check, a probe, or the judge. Six passing expectations and five criteria still
+  read `0 of 5 measured`, which is confusing rather than wrong — the expectations
+  are real and do block a stop when they stop holding. Closing the gap means adding
+  `--criterion` and recording the passing path, which is a decision about ledger
+  volume, not a typo.
+- **The earned leash is not measured yet, only bounded.** The refund is asserted by
+  unit and end-to-end tests — a changed check output refunds, an identical one costs
+  double, the ceiling holds at `3 ×` the tier — but whether it *reduces
+  rounds-to-completion* needs a harness that runs the loop rather than the grader,
+  and that does not exist yet. Until it does, this is a mechanism with a safety
+  argument and no efficacy number.
+- **A goal with no verifier earns almost nothing.** Two of the three progress signals
+  need a check, a probe, a judge or an expectation, so the refund helps `verified`
+  and `judged` goals and barely touches `unverified` ones. That is the autonomy
+  slider working as intended, and it means "work on larger tasks" is conditional on
+  attaching a check command.
+- **The permission-ask classifier is patterns, not comprehension.** It catches 15 of
+  16 permission-asks in a 26-case corpus and blocks none of the 10 genuine
+  questions. A permission-ask phrased in a way the corpus does not contain falls
+  through to `allow`, which is the old behaviour; recall is reported and is not 100%.
+  The corpus is this repository's own phrasing plus hand-written adversarial pairs —
+  one model, one codebase.
+- **A blocked permission-ask spends a continuation.** On a goal with two rounds left,
+  two permission-asks exhaust the budget and the turn ends anyway.
+- **The ETA is uncalibrated on real work, and says so.** `npm run eta` backtests it
+  against recorded sessions; today it reports *nothing scoreable*, because a session
+  needs a finished task list to have a horizon and only one local session had a task
+  list at all. The numbers that exist come from a synthetic fixture and establish
+  that the harness scores, not that the estimate is accurate. The backtest already
+  earned its place twice: it caught a methodology bug that produced a MAPE of
+  837,734%, and it deleted the estimator's trimmed median for measuring worse than
+  a plain one.
+- **Most sessions have no task list to count.** Bandaid asks the model to keep one
+  and now reads it back — from `TaskCreate`/`TaskUpdate`, which carry stable ids, or
+  from `TodoWrite`, which does not. Across 15 local sessions, **1 used a task tool
+  at all**. So anything derived from task counts is absent far more often than it is
+  present, and has to degrade to something else rather than to a guess.
+- **A task list is the model's own account of its plan, not ground truth.** Nothing
+  closes a goal because a task said `completed`; the criteria and the evidence
+  ledger remain the only bar. A vanished task is recorded as **dropped, never as
+  done** — inferring completion from absence would make every mid-work restructure
+  look like a burst of productivity.
+- **Matching a reworded `TodoWrite` entry is a guess.** A word-boundary prefix test
+  catches the common case exactly; past that it is token overlap at 0.6, and
+  durations resting on it are flagged `fuzzy` and excluded from any headline number.
+  Two identically-worded tasks are told apart only by their position in the list.
+- **A recorded tool duration is the duration of the *call*, not of the work.** An
+  asynchronous tool that launches something and returns looks like 20ms. A tool
+  that waits for you to answer measures how long you took. Both are true readings
+  of what was asked and neither is what a reader assumes, so the profile reports
+  per-tool percentiles rather than one number for "a tool call".
+- **`hook` timing has never been observed.** No real `PostToolBatch` payload
+  inspected carries a duration, so every sample comes from the transcript, where
+  `tool_result.timestamp − tool_use.timestamp` is exact. The `gap` fallback — the
+  interval between two batches completing, which contains the model's own thinking
+  time — is implemented and tested but unused in practice, and its inflation on
+  real work is unmeasured.
+- **The clock is not always on.** It renders in the continuation prompt, in the
+  compaction restore, and on a `SessionStart` that was already emitting something.
+  A session with no goal and no compaction sees no time at all — that is the price
+  of injecting nothing until something needs it, and it was chosen over a per-turn
+  block costing roughly 35 tokens every turn forever.
+- **"Since last progress" currently means "since last edit".** It advances on any
+  turn that ran `Edit`/`Write`/`Bash`/`Task`, so a turn that changed files while
+  achieving nothing counts as progress. A signal worth the name has to read the
+  evidence ledger; until it does, that line is weaker than it sounds.
+- **An adopted goal's clock restarts.** `startedAt` resets on adoption so a
+  wall-clock budget matches the fresh continuation allowance a new day earns. The
+  objective's true age is `createdAt`, which is what `bandaid goal history` shows —
+  so a 2h budget means 2h per session, not 2h across three days.
 - **Constraint extraction is a regex over the objective's clauses.** It finds
   `do not`, `never`, `avoid`, `must not`, `without touching`, and friends. Phrase
   a constraint some other way and it is not extracted, and nothing tells you so —
@@ -780,8 +1006,11 @@ the first compaction after install replays prompts from before Bandaid existed.
 ## Development
 
 ```bash
-npm test          # 324 tests, no dependencies, no network
+npm test          # 364 tests, no dependencies, no network
 npm run eval      # measures the judge against fixtures; needs `claude` on PATH
+npm run eta       # backtests the ETA against recorded sessions; skips if none
+npm run autonomy  # scores the permission-ask classifier against its corpus
+npm run loop      # runs the Stop loop against 7 fixtures; offline, ~17s
 node bin/bandaid.js doctor
 ```
 
@@ -878,11 +1107,46 @@ repository that changes between them. Until that exists, the ledger is an
 unmeasured bet, which is exactly what `karpathy-report.md` warns against, now
 labelled as one instead of assumed to be fine.
 
-One honest gap: the 277-word completion audit **cannot** be ablated here,
-because it lives in the continuation prompt and the judge never sees it.
-Measuring it needs a different harness — one that runs the loop rather than the
-grader — which does not exist yet. Until it does, the audit keeps its dated
-sunset note and nothing else.
+### Measuring the loop, not the grader
+
+The harness that runs the loop rather than the grader now exists:
+
+```bash
+npm run loop                              # 7 fixtures, offline, ~17s
+npm run loop -- --ablate completion-audit
+npm run loop -- --ablate ledger --judge
+```
+
+It runs several `Stop` rounds against a fixture repository that **changes between
+them**, with a *scripted* worker standing in for the model — deterministic, free, and
+reviewable. It reports which mechanism ended each loop, and separates "a fixture aims
+at this and it never fires" from "no fixture reaches this".
+
+**It found a real bug on its first run.** The failure reason Bandaid compared across
+rounds contained only the check *command*, not its output — a constant — so the
+plateau breaker fired after any two consecutive failing rounds regardless of progress,
+and the "the verdict changed" progress signal could never fire at all. A fixture
+landing one of four pipeline stages per round, reporting `only 1 of 4`, `only 2 of 4`,
+`only 3 of 4`, was **terminated at round 3 before it could go green at round 4**.
+Nothing in the repository could see that, because nothing ran the loop.
+
+**What it still cannot measure is prose.** A script does not read the prompt, so
+every prompt-block ablation comes back byte-identical to the baseline — and that is
+the only possible outcome, not a finding. The 277-word completion audit is therefore
+**not cut**, and its sunset note now names the experiment that would settle it
+(`--worker claude`, a model-in-the-loop tier, deliberately unbuilt) instead of a flag
+that exists and cannot answer.
+
+**The evidence ledger's excuse is spent, and its answer is unchanged.** The fixture
+`karpathy-report.md` asked for — two sequential judgements over a repository that
+changes between them — now exists: round 1 lands a correct implementation, round 2
+adds a test and reverts the implementation, so round 1's ledger entry describes a
+worktree that is gone. With the judge on, the goal correctly stays open **with and
+without the ledger**. Two independent harnesses now agree the ablation moves no
+number. It is kept, because the judge is right in both arms and so there was no
+headroom for the ledger to improve — and what would settle it is a trap invisible from
+the files alone. If no such fixture can be built, that is the argument for deletion,
+and it should be made in those terms rather than by another flat ablation.
 
 That is ten fixtures on one theme with Haiku and criteria supplied — a floor,
 not a general claim about the judge. What it buys is a regression detector: the

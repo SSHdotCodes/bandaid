@@ -1,0 +1,26 @@
+{"text":"Should I proceed with the migration?","expect":"permission","note":"in scope, already instructed"}
+{"text":"Shall I proceed?","expect":"permission","note":"the canonical case"}
+{"text":"Want me to keep going?","expect":"permission","note":"offer to continue"}
+{"text":"Would you like me to continue with the remaining files?","expect":"permission","note":"polite offer, same thing"}
+{"text":"Do you want me to go ahead and apply the fix?","expect":"permission","note":"asking to do assigned work"}
+{"text":"Ready for me to start on the tests?","expect":"permission","note":"the tests are in scope"}
+{"text":"Ok to proceed?","expect":"permission","note":"terse permission slip"}
+{"text":"Can I continue?","expect":"permission","note":"terse permission slip"}
+{"text":"Should I keep working on this?","expect":"permission","note":"the objective says yes"}
+{"text":"Shall I carry on?","expect":"permission","note":"offer to continue"}
+{"text":"Does that sound good?","expect":"permission","note":"progress checkpoint, no question content"}
+{"text":"Does that look right?","expect":"permission","note":"progress checkpoint"}
+{"text":"Make sense?","expect":"permission","note":"progress checkpoint"}
+{"text":"Any objections?","expect":"permission","note":"progress checkpoint"}
+{"text":"Let me know if you want me to proceed with the rest?","expect":"permission","note":"offer dressed as a statement"}
+{"text":"Should I do the tests first or the docs first?","expect":"permission","note":"choice phrasing, both in scope, the model can pick"}
+{"text":"Which of the two API keys should I use — staging or prod?","expect":"genuine","note":"cannot rank without the user"}
+{"text":"Would you like me to use the staging key, or do you have a production one?","expect":"genuine","note":"offer phrasing, real question underneath"}
+{"text":"What should the retry limit be?","expect":"genuine","note":"a product decision"}
+{"text":"Did you mean the v2 endpoint or the legacy one?","expect":"genuine","note":"clarifying the instruction"}
+{"text":"Is the billing module in scope for this refactor?","expect":"genuine","note":"scope question only the user settles"}
+{"text":"I need an API key for the staging environment — do you have one?","expect":"genuine","note":"a value only the user has"}
+{"text":"Which database should the migration target?","expect":"genuine","note":"cannot be derived"}
+{"text":"Do you have a preference between Postgres and SQLite here?","expect":"genuine","note":"explicit preference request"}
+{"text":"What is the deadline for this?","expect":"genuine","note":"only the user knows"}
+{"text":"How should I handle the case where the upstream returns 429?","expect":"genuine","note":"design decision put to the user"}

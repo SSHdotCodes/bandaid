@@ -186,6 +186,70 @@ describe('hook lifecycle', () => {
   });
 });
 
+describe('batch timing', () => {
+  const SESSION_T = 'e2e-session-timing';
+
+  function batch(sessionId) {
+    return runHook('post-tool-batch.js', {
+      session_id: sessionId,
+      cwd: ROOT,
+      tool_calls: [{ tool_name: 'Bash', tool_input: { command: 'true' }, tool_response: 'ok' }],
+    });
+  }
+
+  function turns(sessionId) {
+    const file = path.join(HOME, 'sessions', sessionId, 'turns.jsonl');
+    return fs
+      .readFileSync(file, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+  }
+
+  it('carries a null duration on the first batch, never a zero', () => {
+    runHook('user-prompt-submit.js', { session_id: SESSION_T, cwd: ROOT, prompt: 'Do a thing with several steps' });
+    batch(SESSION_T);
+
+    const [first] = turns(SESSION_T);
+    assert.equal(first.timing, 'none');
+    assert.equal(first.durationMs, null, 'a zero would be folded into a profile and drag every estimate down');
+  });
+
+  it('measures the gap to the previous batch, and says that is what it measured', () => {
+    // A real interval, so this asserts against a number rather than a shape. The
+    // gap contains everything between two batches completing, which is why it is
+    // labelled `gap` and not treated as tool duration.
+    const waited = 420;
+    execFileSync(process.execPath, ['-e', `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${waited})`]);
+    batch(SESSION_T);
+
+    const all = turns(SESSION_T);
+    const latest = all[all.length - 1];
+    assert.equal(latest.timing, 'gap');
+    assert.ok(
+      latest.durationMs >= waited,
+      `recorded ${latest.durationMs}ms for a ${waited}ms wait — a gap is a ceiling, so it may exceed but never undershoot`,
+    );
+    assert.ok(latest.durationMs < waited + 20_000, `recorded ${latest.durationMs}ms, which is not a plausible gap`);
+    assert.ok(latest.startedAt, 'the previous batch it measured from is recorded');
+  });
+
+  it('prefers timing the payload supplies over the gap it would have guessed', () => {
+    const session = 'e2e-session-timing-hook';
+    runHook('user-prompt-submit.js', { session_id: session, cwd: ROOT, prompt: 'Another multi-step instruction' });
+    runHook('post-tool-batch.js', {
+      session_id: session,
+      cwd: ROOT,
+      duration_ms: 1234,
+      tool_calls: [{ tool_name: 'Bash', tool_input: { command: 'true' }, tool_response: 'ok' }],
+    });
+
+    const [record] = turns(session);
+    assert.equal(record.timing, 'hook');
+    assert.equal(record.durationMs, 1234);
+  });
+});
+
 describe('verification gate', () => {
   const SESSION_CHECK = 'e2e-session-check';
 
@@ -224,6 +288,172 @@ describe('verification gate', () => {
     assert.equal(result.code, 2);
     assert.ok(result.stderr.includes('FAIL src/auth.test.ts:41'), 'the model gets the failure, not another sermon');
     assert.ok(result.stderr.includes('not up for debate'), 'and it is framed as external, not as self-assessment');
+  });
+
+  // The clock, end to end. best-goal-report.md specified budgets on turns, tokens
+  // and wall-clock; these are the first tests that any elapsed figure reaches the
+  // model at all.
+  it('hands the model the time, its goal age, and its wall-clock budget', () => {
+    const session = 'e2e-session-elapsed';
+    const env = { BANDAID_TIME_BUDGET: '6h' };
+    armGoal(session, 'Rebuild the ingestion pipeline end to end', env);
+
+    const result = runHook('stop.js', { session_id: session, cwd: ROOT }, env);
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /^Elapsed:$/m, 'the block reaches the model');
+    assert.match(result.stderr, /^- Now: \d{2}:\d{2} \(\w{3} \d{1,2} \w{3}\)$/m);
+    assert.match(result.stderr, /^- This goal: (just now|\d+m|\d+h( \d+m)?) of 6h$/m, 'against its budget');
+  });
+
+  it('says nothing about elapsed time when there is no start to measure from', () => {
+    // A goal record written before startedAt existed must not render a clause with
+    // no input, and must not read as a spent budget either.
+    const session = 'e2e-session-no-clock';
+    armGoal(session, 'Port the remaining handlers to the new router');
+    const goalFile = path.join(HOME, 'sessions', session, 'goal.json');
+    const goal = JSON.parse(fs.readFileSync(goalFile, 'utf8'));
+    fs.writeFileSync(goalFile, JSON.stringify({ ...goal, startedAt: null, createdAt: null }));
+
+    const result = runHook('stop.js', { session_id: session, cwd: ROOT });
+    assert.equal(result.code, 2, 'an unknown elapsed is not an exhausted budget');
+    assert.doesNotMatch(result.stderr, /^Elapsed:$/m);
+  });
+
+  it('wraps up a goal that has run out of wall-clock', () => {
+    const session = 'e2e-session-time-budget';
+    const env = { BANDAID_TIME_BUDGET: '1h', BANDAID_MAX_CONTINUATIONS: '10' };
+    armGoal(session, 'Reconcile the two billing ledgers', env);
+
+    // Backdate the start past the budget. Nothing else about the goal changes, so
+    // the only reason this stop can wrap up is the clock.
+    const goalFile = path.join(HOME, 'sessions', session, 'goal.json');
+    const goal = JSON.parse(fs.readFileSync(goalFile, 'utf8'));
+    fs.writeFileSync(
+      goalFile,
+      JSON.stringify({ ...goal, startedAt: new Date(Date.now() - 90 * 60 * 1000).toISOString() }),
+    );
+
+    const result = runHook('stop.js', { session_id: session, cwd: ROOT }, env);
+    assert.equal(result.code, 2, 'an explicit budget earns the wrap-up turn');
+    assert.match(result.stderr, /budget/i);
+
+    const after = JSON.parse(fs.readFileSync(goalFile, 'utf8'));
+    assert.equal(after.status, 'budget_limited');
+  });
+
+  it('hands the model one capacity line with a measured ETA in it', () => {
+    // The end-to-end path for criterion 3: task durations recorded by the ledger,
+    // projected by the estimator, rendered into the prompt the model actually gets.
+    const session = 'e2e-session-eta';
+    armGoal(session, 'Rewrite the ingestion layer and its tests');
+
+    // Written with fs rather than by calling tasks.observe in this process. This
+    // suite is subprocess-only on purpose: the state dir is chosen by an env var
+    // the *child* gets, so an in-process write lands in the real ~/.claude/bandaid
+    // instead of the throwaway one.
+    const MINUTE = 60_000;
+    const events = [];
+    let clock = Date.parse('2026-07-30T09:00:00.000Z');
+    const at = (ms) => new Date((clock += ms)).toISOString();
+    for (let i = 1; i <= 8; i += 1) {
+      events.push({ ts: at(1000), turnIndex: 1, taskId: `task:${i}`, title: `Step ${i}`, status: 'pending', matchedBy: 'id' });
+    }
+    for (const [id, minutes] of [[1, 10], [2, 12], [3, 9]]) {
+      events.push({ ts: at(1000), turnIndex: 1, taskId: `task:${id}`, status: 'in_progress', matchedBy: 'id' });
+      events.push({ ts: at(minutes * MINUTE), turnIndex: 1, taskId: `task:${id}`, status: 'completed', matchedBy: 'id' });
+    }
+    fs.writeFileSync(
+      path.join(HOME, 'sessions', session, 'tasks.jsonl'),
+      `${events.map((e) => JSON.stringify(e)).join('\n')}\n`,
+    );
+
+    const result = runHook('stop.js', { session_id: session, cwd: ROOT });
+    assert.equal(result.code, 2);
+    // Median of 10/12/9 is 10 minutes, five tasks left, so 50 minutes.
+    assert.match(result.stderr, /^Capacity: .*~50m left \(5 tasks, /m);
+    assert.match(result.stderr, /continuation 1\/2/);
+    assert.doesNotMatch(result.stderr, /^Budget:$/m, 'the four-line block it replaced is gone');
+  });
+
+  // Four runs, two exit codes, asserted both ways: a permission-ask and a genuine
+  // question, with autonomy off and on. This is the end-to-end contract for "work
+  // on larger tasks without stopping to ask permission".
+  describe('autonomy, end to end', () => {
+    const PERMISSION = 'The first module is done.\n\nShould I proceed?';
+    const GENUINE = 'One thing I cannot work out:\n\nWhat should the retry limit be?';
+
+    function stopWith(session, message, env) {
+      armGoal(session, 'Rebuild the ingestion pipeline and its tests', env);
+      return runHook('stop.js', { session_id: session, cwd: ROOT, last_assistant_message: message }, env);
+    }
+
+    it('off: a permission-ask ends the turn, as it always has', () => {
+      const result = stopWith('e2e-auto-off-perm', PERMISSION, {});
+      assert.equal(result.code, 0);
+    });
+
+    it('off: a genuine question ends the turn', () => {
+      const result = stopWith('e2e-auto-off-real', GENUINE, {});
+      assert.equal(result.code, 0);
+    });
+
+    it('on: a permission-ask does not end the turn, and is told to decide', () => {
+      const result = stopWith('e2e-auto-on-perm', PERMISSION, { BANDAID_AUTONOMY: '1' });
+      assert.equal(result.code, 2);
+      assert.match(result.stderr, /asking permission to do work already in scope/);
+      assert.match(result.stderr, /Decide it yourself/);
+      assert.match(result.stderr, /goal block/, 'and a real need is routed to the blocker mechanism');
+    });
+
+    it('on: a genuine question still ends the turn', () => {
+      // The failure that must never happen: a question the user never gets asked.
+      const result = stopWith('e2e-auto-on-real', GENUINE, { BANDAID_AUTONOMY: '1' });
+      assert.equal(result.code, 0, 'blocking this would trap the user in a loop');
+    });
+
+    it('on: an ordinary turn gets no autonomy paragraph', () => {
+      const result = stopWith('e2e-auto-on-plain', 'Finished the first module.', { BANDAID_AUTONOMY: '1' });
+      assert.equal(result.code, 2);
+      assert.doesNotMatch(result.stderr, /asking permission to continue/, 'it costs nothing on any other path');
+    });
+  });
+
+  it('refunds a round whose check output actually changed', () => {
+    // The end-to-end path for the earned leash: two rounds, a different failure
+    // each time, so the second round costs nothing and the leash lengthens.
+    const session = 'e2e-session-refund';
+    const first = { BANDAID_GOAL_CHECK: 'echo "3 tests failing"; exit 1', BANDAID_MAX_CONTINUATIONS: '10' };
+    armGoal(session, 'Get the whole suite green', first);
+    const goalFile = path.join(HOME, 'sessions', session, 'goal.json');
+
+    runHook('stop.js', { session_id: session, cwd: ROOT }, first);
+    const afterOne = JSON.parse(fs.readFileSync(goalFile, 'utf8'));
+    assert.equal(afterOne.continuations, 1, 'the first round has nothing to compare against');
+    assert.equal(afterOne.refunded, 0);
+
+    const second = { BANDAID_GOAL_CHECK: 'echo "1 test failing"; exit 1', BANDAID_MAX_CONTINUATIONS: '10' };
+    runHook('stop.js', { session_id: session, cwd: ROOT }, second);
+    const afterTwo = JSON.parse(fs.readFileSync(goalFile, 'utf8'));
+    assert.equal(afterTwo.continuations, 1, '"3 failing" becoming "1 failing" is progress, so the round was free');
+    assert.equal(afterTwo.refunded, 1);
+    assert.equal(afterTwo.lastProgressSignal, 'verdict-changed');
+  });
+
+  it('charges double for a second round that changed nothing', () => {
+    const session = 'e2e-session-stall';
+    const env = { BANDAID_GOAL_CHECK: 'echo "identical failure"; exit 1', BANDAID_MAX_CONTINUATIONS: '10' };
+    armGoal(session, 'Fix the flaky integration test for good', env);
+    const goalFile = path.join(HOME, 'sessions', session, 'goal.json');
+
+    runHook('stop.js', { session_id: session, cwd: ROOT }, env);
+    assert.equal(JSON.parse(fs.readFileSync(goalFile, 'utf8')).continuations, 1);
+
+    runHook('stop.js', { session_id: session, cwd: ROOT }, env);
+    const after = JSON.parse(fs.readFileSync(goalFile, 'utf8'));
+    // Two stalls running: this round cost 2, so a goal going nowhere runs out
+    // sooner than it did before any of this existed.
+    assert.equal(after.continuations, 3);
+    assert.equal(after.stalls, 2);
   });
 
   it('the same failure twice running ends the loop early', () => {

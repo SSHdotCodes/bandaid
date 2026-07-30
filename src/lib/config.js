@@ -55,8 +55,31 @@ const DEFAULTS = {
     // Optional token budget per goal. null = unbounded.
     tokenBudget: null,
 
+    // Optional wall-clock budget per goal, in milliseconds. null = unbounded.
+    //
+    // best-goal-report.md specifies budgets enforced on turns, tokens *and*
+    // wall-clock, and convicts Codex of tracking elapsed time while never
+    // enforcing it. Turns and tokens shipped; this is the third.
+    //
+    // Note what this is not: stamp.js rejects time-based logic for deciding
+    // whether recorded evidence still describes the worktree, and is right to —
+    // that stays content-hashed. This answers a different question, the one
+    // tokenBudget already answers with a number: how much of a finite resource
+    // is left.
+    timeBudgetMs: null,
+
     // Skip the completion audit for turns that changed nothing.
     skipTrivialTurns: true,
+
+    // Whether a trailing question mark still ends the turn unconditionally.
+    //
+    // Off by default, because it changes when Bandaid refuses to let a turn end
+    // and every existing user would get that on upgrade. With it on, a request for
+    // permission to do work already in scope — "Should I proceed?" — no longer
+    // releases the loop, while a genuine question the environment cannot answer
+    // still does. Anything the classifier is unsure about still does too: see
+    // src/lib/autonomy.js for why uncertainty resolves to the old behaviour.
+    autonomy: false,
 
     // What a brand-new session does about an objective left open in this
     // project. "offer" names it and arms nothing, so picking it up is a
@@ -125,6 +148,14 @@ const DEFAULTS = {
     sweepIntervalHours: 24,
   },
 
+  // Prompt blocks to withhold, by name. Empty in every real run.
+  //
+  // This exists so eval/loop.js can measure whether a block earns its tokens:
+  // a mechanism that cannot be withheld cannot be ablated, and one that cannot be
+  // ablated ships on an assumption. Set through BANDAID_ABLATE rather than a config
+  // file, because it is a measurement knob and not a preference.
+  ablate: [],
+
   debug: false,
 };
 
@@ -175,6 +206,12 @@ function envOverrides() {
   const enabled = bool('BANDAID_ENABLED');
   if (enabled !== undefined) out.enabled = enabled;
 
+  if (process.env.BANDAID_ABLATE) {
+    out.ablate = process.env.BANDAID_ABLATE.split(',')
+      .map((name) => name.trim())
+      .filter(Boolean);
+  }
+
   const debug = bool('BANDAID_DEBUG');
   if (debug !== undefined) out.debug = debug;
 
@@ -197,7 +234,15 @@ function envOverrides() {
   if (process.env.BANDAID_PROBE_MANIFEST) out.probes = { ...(out.probes || {}), manifest: process.env.BANDAID_PROBE_MANIFEST };
   const maxCont = int('BANDAID_MAX_CONTINUATIONS');
   if (maxCont !== undefined) goals.maxContinuations = maxCont;
+  if (process.env.BANDAID_TIME_BUDGET) {
+    // Accepts the same "90m"/"2h"/"5400000" forms as `goal set --time-budget`,
+    // so a one-off run and a stored goal are configured the same way.
+    const ms = require('./duration').parseDuration(process.env.BANDAID_TIME_BUDGET);
+    if (ms != null) goals.timeBudgetMs = ms;
+  }
   if (process.env.BANDAID_GOAL_CHECK) goals.check = process.env.BANDAID_GOAL_CHECK;
+  const autonomy = bool('BANDAID_AUTONOMY');
+  if (autonomy !== undefined) goals.autonomy = autonomy;
   const judge = bool('BANDAID_JUDGE');
   if (judge !== undefined) goals.judge = judge;
   if (process.env.BANDAID_JUDGE_MODEL) goals.judgeModel = process.env.BANDAID_JUDGE_MODEL;

@@ -38,6 +38,9 @@
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
     "eval": "node eval/run.js",
+    "eta": "node eval/eta-backtest.js",
+    "autonomy": "node eval/autonomy-eval.js",
+    "loop": "node eval/loop.js",
     "doctor": "node bin/bandaid.js doctor"
   },
   "engines": {

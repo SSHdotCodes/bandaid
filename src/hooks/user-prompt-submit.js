@@ -33,6 +33,13 @@ runHook('UserPromptSubmit', ({ input, config }) => {
     }
   }
 
+  // The first prompt is the only moment a hook can be certain it is the first,
+  // so this is where session age comes from. Written once and never moved: an
+  // overwrite would reset the age of a session that has been running all day.
+  if (!store.readMeta(sessionId).startedAt) {
+    store.updateMeta(sessionId, { startedAt: new Date().toISOString() });
+  }
+
   const turnIndex = ledger.bumpTurnIndex(sessionId);
 
   const goalConfig = config.goals || {};

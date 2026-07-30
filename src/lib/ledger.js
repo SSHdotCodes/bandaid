@@ -50,9 +50,15 @@ function backfillFromTranscript(sessionId, transcriptPath) {
     merged.map((p) => JSON.stringify(p)).join('\n') + (merged.length ? '\n' : ''),
   );
 
-  if (merged.length > currentTurnIndex(sessionId)) {
-    store.updateMeta(sessionId, { turnIndex: merged.length });
+  const patch = {};
+  if (merged.length > currentTurnIndex(sessionId)) patch.turnIndex = merged.length;
+  // A mid-session install replays prompts from before Bandaid existed, and the
+  // oldest of them is when this session actually began. Without this a session
+  // Bandaid joined at hour three would report itself as newborn.
+  if (!store.readMeta(sessionId).startedAt && merged[0] && merged[0].ts) {
+    patch.startedAt = merged[0].ts;
   }
+  if (Object.keys(patch).length) store.updateMeta(sessionId, patch);
   return missing.length;
 }
 
@@ -81,8 +87,21 @@ function adoptPreviousLedger(sessionId, cwd, previousSessionId = null) {
   } catch {
     // A session with prompts but no tool calls is legitimate.
   }
+  try {
+    const tasksFile = require('./tasks').tasksFile;
+    fs.copyFileSync(tasksFile(previous), tasksFile(sessionId));
+  } catch {
+    // Likewise: plenty of sessions never write a task list.
+  }
   adoptGoal(sessionId, previous);
-  store.updateMeta(sessionId, { turnIndex: prompts.length, adoptedFrom: previous });
+  // Session age travels with the ledger it describes. A resume that minted a new
+  // id would otherwise restart the clock on a conversation that has been running
+  // for hours, which is precisely the multi-day case this all exists for.
+  store.updateMeta(sessionId, {
+    turnIndex: prompts.length,
+    adoptedFrom: previous,
+    startedAt: store.sessionStartedAt(previous) || prompts[0]?.ts || null,
+  });
   return true;
 }
 
