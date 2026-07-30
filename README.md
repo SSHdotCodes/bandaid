@@ -1201,6 +1201,7 @@ npm run loop                              # 8 fixtures, offline, ~20s
 npm run loop -- --ablate completion-audit
 npm run loop -- --ablate ledger --judge
 npm run loop -- --ablate seal
+npm run loop -- --worker claude           # a model reads the prompt: slow, paid
 ```
 
 It runs several `Stop` rounds against a fixture repository that **changes between
@@ -1216,12 +1217,33 @@ landing one of four pipeline stages per round, reporting `only 1 of 4`, `only 2 
 `only 3 of 4`, was **terminated at round 3 before it could go green at round 4**.
 Nothing in the repository could see that, because nothing ran the loop.
 
-**What it still cannot measure is prose.** A script does not read the prompt, so
-every prompt-block ablation comes back byte-identical to the baseline — and that is
-the only possible outcome, not a finding. The 277-word completion audit is therefore
-**not cut**, and its sunset note now names the experiment that would settle it
-(`--worker claude`, a model-in-the-loop tier, deliberately unbuilt) instead of a flag
-that exists and cannot answer.
+**The scripted worker cannot measure prose.** A script does not read the prompt, so
+every prompt-block ablation against it comes back byte-identical to the baseline — and
+that is the only possible outcome, not a finding.
+
+**`--worker claude` is the tier that can.** It hands the model the objective on round
+1 and the previous stop's continuation prompt — verbatim — on every round after, so
+withholding a block genuinely changes what was read. It is opt-in twice like the judge
+(the fixture declares `"worker": true`, the run passes the flag), nondeterministic, and
+paid, which is what `--samples` is for:
+
+```bash
+npm run loop -- --worker claude --samples 5 --filter blocked
+npm run loop -- --worker claude --samples 5 --filter blocked --ablate completion-audit
+```
+
+Expect minutes and real spend per arm, so it is never in `npm test` and never in the
+default `npm run loop`. One run of it is an anecdote; `docs/plans/13-model-worker.md`
+states what may be claimed from it and what may not.
+
+**It found a false close on its second run, and a defect underneath it.** Given an
+objective with a criterion this environment cannot satisfy, the model ran
+`bandaid goal complete` and the loop released. `decideOnStop` returns `allow` on any
+terminal status, and the `Stop` hook returns before `verify.assess` — so a goal the
+model has declared complete is **never verified, even with a check or a seal
+configured**. Reproduced deterministically both ways. No scripted fixture could reach
+it, because no scripted worker in the suite ever calls `goal complete`. Not yet fixed;
+it is named here rather than left for someone to hit.
 
 **The seal's ablation is the one that came back non-null.** Every other mechanism
 measured by this harness either could not be measured by it (prose) or moved no

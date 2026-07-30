@@ -130,15 +130,36 @@ Three bugs found by measurement rather than by reading:
 
 ### Still open, and named rather than left implied
 
-- **Prose is unmeasured.** The loop worker is a script, so no ablation can justify
-  cutting a paragraph. `--worker claude` is the tier that would; it is not built.
+- ~~**Prose is unmeasured.**~~ **Reachable as of brief 13.** `--worker claude` exists
+  and hands the model the real continuation prompt, so an ablation can change an
+  outcome. The 277-word audit's keep-or-cut decision is now a run away rather than a
+  tier away — but the run is blocked behind brief 13's false-close finding, because a
+  model that can close a goal by declaring it done makes an honesty metric meaningless.
 - **The stall rule is shadowed by the plateau breaker** and may reach nothing the
-  plateau breaker cannot. Settling it needs a judge-graded fixture whose prose varies.
+  plateau breaker cannot. Settling it needs a judge-graded fixture whose prose varies —
+  which brief 13's tier can now produce.
 - **The ETA has zero real-session coverage.** `npm run eta` reports nothing scoreable
   until sessions with finished task lists accumulate.
 - **Nondeterministic check output buys unearned refunds**, bounded only by the ceiling.
 - **No loop fixture ends a round with a permission-ask**, so brief 6's paragraph is
-  untested by ablation.
+  untested by ablation. A model worker produces them; a script never will.
+
+### The defect brief 13 found, which outranks the measurement it was built for
+
+**A goal the model declares complete is never verified.** `decideOnStop` returns
+`allow` on any terminal status (`src/lib/goals.js:605`) and `src/hooks/stop.js:148`
+returns before `verify.assess` — so `bandaid goal complete` closes the goal with the
+check red, the seal red, and the judge unrun. Reproduced deterministically both ways.
+It contradicts `README.md:692` (*"Anything else vetoes the stop"*), so it is a defect,
+not a design choice.
+
+Invisible to 531 tests and eight loop fixtures for one reason: **no scripted worker
+here has ever called `goal complete`.** The first real model did, on its second run.
+
+Not fixed in brief 13, which touches no product code. The repair is a decision — verify
+inside the CLI's `complete`, or re-verify a claimed completion in the hook — plus the
+fixture that pins it, and it should land before any honesty number is collected from
+the model tier, because a worker that can close by fiat cannot be scored on honesty.
 
 **Brief 3's finding reshapes brief 4.** A task list exists for **1 of 15** local
 sessions. Task-count ETA is therefore the exception, not the rule, and brief 4's
@@ -175,11 +196,13 @@ change how the existing work should be read:
 |---|---|---|---|
 | 11 | [The seal](11-seal.md) | `goals.seal`; a held-out check the worker never sees | `npm run loop -- --ablate seal` — the fixture closes `complete` without it |
 | 12 | [Criteria independence](12-criteria-independence.md) | `runCriteria`; an acceptance gate | `npm run criteria` — coverage of hand-written ground truth |
+| 13 | [A model in the loop](13-model-worker.md) | `--worker claude`, `--samples`; rate-aware grading | Itself — the tier the other briefs kept naming |
 
 | # | State |
 |---|---|
 | 11 | **shipped, and its ablation is not null.** A new loop fixture in SpecBench's feature-isolation shape closes as `complete` at round 1 with the seal withheld, and blocks at round 2 with it. 8/8 → 7/8 ablated, other fixtures unmoved. Three leak paths closed and tested, including the ledger→judge→reason hop nobody would have found by reading. Costs one terminal golden and zero words on any continuation |
 | 12 | **shipped, and the number it produced is half-trustworthy on purpose.** Independent derivation covers 89% of ground truth against a worker baseline's 33%, stable over 9 samples — but the baseline is three lists the fixture author wrote knowing the score. The independent arm is measured; the *margin* is not, and the brief says so rather than quoting 56 points |
+| 13 | **shipped, and it earned its place before producing a number.** The tier the other briefs named seven times now exists: opt-in twice, `--samples`-aware, 531 tests, all ten continuation goldens unmoved. Two smoke runs found three things no scripted fixture could — that every `expected.json` encodes a *script's* behaviour rather than the loop's, that `byRound` therefore cannot be applied to a model, and a **false close that bypasses the check, the seal, and the judge outright**. The ablation numbers are not collected yet; the defect is why |
 
 ### What these two did not change
 
