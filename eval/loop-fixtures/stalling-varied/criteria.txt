@@ -1,0 +1,1 @@
+the check exits 0

@@ -1,0 +1,3 @@
+src/client.js exports backoffDelays
+the delays strictly increase
+test/client.test.js asserts that they increase

@@ -1,0 +1,2 @@
+src/print.js exports confirm
+the physical printer acknowledges a job

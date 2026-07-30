@@ -13,8 +13,17 @@ const store = require('../src/lib/store');
 const verify = require('../src/lib/verify');
 const { buildRestoreBlock } = require('../src/lib/restore');
 const { COMPACTION_FIDELITY_ADDENDUM, SUMMARIZATION_PROMPT } = require('../src/lib/prompts');
+const { formatBudget, formatDuration, parseDuration, timeUsedMs } = require('../src/lib/duration');
 
 const pkg = require('../package.json');
+
+// `bandaid tasks | head -4` closes the pipe while we are still writing, and an
+// unhandled EPIPE turns a normal shell idiom into a stack trace. Exiting quietly
+// is what every other CLI does here.
+process.stdout.on('error', (err) => {
+  if (err && err.code === 'EPIPE') process.exit(0);
+  throw err;
+});
 
 function out(text = '') {
   process.stdout.write(`${text}\n`);
@@ -97,6 +106,7 @@ Usage: bandaid <command> [options]
   goal set <objective>       Set the objective explicitly
       --check "<command>"    Close the goal automatically when this exits 0
       --budget <tokens>      Stop continuing after roughly this many tokens
+      --time-budget <dur>    Wrap up after this much wall-clock (90m, 2h, 1h30m)
       --probe <id>           Arm a specific probe (repeatable; default is the manifest)
       --scope <glob>         Declare a path this goal may touch (repeatable)
   goal criteria [<c> ...]    Record the fixed acceptance criteria, or list them
@@ -126,6 +136,9 @@ Usage: bandaid <command> [options]
       --pointer <ref>        Where to check it: file.js:12, or "cmd:npm test"
 
   inspect [--session ID]     Summarize the ledger for a session
+  durations                  What this project's tools cost, as p50/p95
+                             [--transcript <path>] [--json]
+  tasks [--session ID]       The task list this session worked, with durations
   preview [--session ID]     Print exactly what would be injected after a compaction
   prompt                     Print the compaction prompt Bandaid installs
   sessions                   List sessions with a ledger
@@ -153,6 +166,11 @@ function cmdStatus(flags) {
   out(`  enabled:        ${cfg.enabled ? 'yes' : 'no'}`);
   out(`  compaction:     ${cfg.compact.enabled ? 'on' : 'off'} (verbatim budget ${cfg.compact.userMessageMaxTokens} tokens, digests ${cfg.compact.digestBudgetTokens} tokens)`);
   out(`  goals:          ${cfg.goals.enabled ? cfg.goals.mode : 'off'} (max ${goals.resolveMaxContinuations(cfg)} continuation(s) per goal, ${goals.verifierStrength(cfg)})`);
+  out(
+    `  budgets:        tokens ${cfg.goals.tokenBudget ?? 'unbounded'}, wall-clock ${
+      cfg.goals.timeBudgetMs ? formatBudget(cfg.goals.timeBudgetMs) : 'unbounded'
+    }`,
+  );
   out(`  verification:   check ${cfg.goals.check ? `\`${cfg.goals.check}\`` : 'unset'}, judge ${cfg.goals.judge ? `on (${cfg.goals.judgeModel})` : 'off'}`);
   out(`  config file:    ${config.configPath()}`);
   out(`  state dir:      ${config.homeDir()}`);
@@ -317,6 +335,28 @@ function cmdGoal(positional, flags) {
       out(`source:        ${goal.source}`);
       out(`continuations: ${goal.continuations}/${goal.maxContinuations ?? '∞'}`);
       out(`tokens used:   ~${goal.tokensUsed}${goal.tokenBudget ? ` / ${goal.tokenBudget}` : ''}`);
+      // Elapsed is measured, unlike the token figure above it, which sums already
+      // truncated digests and is a floor. Worth showing side by side so the
+      // difference in quality is visible.
+      const elapsed = timeUsedMs(goal);
+      const timeBudget = goal.timeBudgetMs ?? config.loadConfig().goals.timeBudgetMs ?? null;
+      if (elapsed != null) {
+        out(`elapsed:       ${formatDuration(elapsed)}${timeBudget ? ` / ${formatBudget(timeBudget)}` : ''}`);
+      }
+      // An estimate, marked as one. It sits under two measured figures, and
+      // rendering all three with equal confidence is how a useful signal becomes
+      // a misleading one.
+      const est = goalEstimate(sessionId, goal);
+      if (est) {
+        const range =
+          est.lowMs == null || est.highMs == null
+            ? ''
+            : ` (range ${formatDuration(est.lowMs)}–${formatDuration(est.highMs)})`;
+        out(
+          `eta:           ~${formatDuration(est.remainingMs)} remaining${range}` +
+            `  [${est.unitsRemaining} ${est.basis === 'tasks' ? 'task' : 'round'}(s) left, n=${est.n}]`,
+        );
+      }
       const effectiveCheck = goal.check ?? config.loadConfig().goals.check;
       out(`check:         ${effectiveCheck || 'none'}`);
       const criteria = goal.criteria || [];
@@ -349,6 +389,17 @@ function cmdGoal(positional, flags) {
       const check = typeof flags.check === 'string' ? flags.check : null;
       const cwd = flags.cwd || process.cwd();
 
+      // Rejected rather than guessed: a budget parsed wrongly caps the work at a
+      // number nobody chose, and does it silently.
+      let timeBudgetMs = null;
+      if (flags['time-budget'] !== undefined) {
+        timeBudgetMs = parseDuration(flags['time-budget']);
+        if (timeBudgetMs == null) {
+          fail(`could not read --time-budget "${flags['time-budget']}" — try 90m, 2h, 1h30m, or milliseconds`);
+          return;
+        }
+      }
+
       // Freeze the armed probe set now, the same discipline criteria follow: a
       // manifest edited mid-goal must not retroactively move the bar. An
       // explicit --probe list wins; otherwise the trusted manifest as it stands.
@@ -369,6 +420,7 @@ function cmdGoal(positional, flags) {
           ? Number(flags['max-continuations'])
           : goals.resolveMaxContinuations(cfg, { check }),
         tokenBudget: flags.budget ? Number(flags.budget) : null,
+        timeBudgetMs,
         // Scope the goal to the work that follows it. Without this an explicit
         // goal gets turnIndex 0 and `turnsForGoal` sweeps the whole session, so
         // both the token estimate and the judge's evidence include work that
@@ -380,6 +432,9 @@ function cmdGoal(positional, flags) {
       out(`Goal set for session ${sessionId}.`);
       if (typeof flags.check === 'string') {
         out(`It closes automatically when \`${flags.check}\` exits 0.`);
+      }
+      if (timeBudgetMs != null) {
+        out(`It wraps up after ${formatBudget(timeBudgetMs)} of wall-clock.`);
       }
       return;
     }
@@ -586,6 +641,121 @@ function cmdVerify(flags) {
     out(result.verification.output);
   }
   if (!result.proven) process.exitCode = 1;
+}
+
+/**
+ * What this project's tools actually cost. The only surface the duration profile
+ * has — it is read by the estimator, not shown to the model.
+ */
+function cmdDurations(flags) {
+  const cwd = flags.cwd || process.cwd();
+  const root = project.projectRoot(cwd);
+  const durations = require('../src/lib/durations');
+
+  // Fold in anything the transcript has that the profile has not seen. A CLI run
+  // has no transcript path, so this only helps when one is passed explicitly.
+  if (flags.transcript) durations.sync(root, flags.transcript);
+
+  const result = durations.profile(root);
+  if (flags.json) {
+    out(JSON.stringify(result, null, 2));
+    return;
+  }
+  if (!result) {
+    out('No tool durations recorded for this project yet.');
+    out('They accumulate from the transcript at every stop.');
+    return;
+  }
+
+  out(`tool durations for ${root}`);
+  out(`  synced through ${result.syncedThrough || 'never'}`);
+  out('');
+  // Milliseconds, not formatDuration: this is a measurement table, and a tool
+  // that takes 233ms must not render as "just now".
+  const ms = (n) => (n == null ? '—' : `${n}ms`);
+
+  const rows = Object.entries(result.tools).sort((a, b) => b[1].n - a[1].n);
+  for (const [name, s] of rows) {
+    const derivations = Object.entries(s.timing)
+      .map(([k, v]) => `${k}:${v}`)
+      .join(' ');
+    out(
+      `  ${name.padEnd(18)} n=${String(s.n).padStart(4)}  p50 ${ms(s.p50).padStart(9)}  p95 ${ms(s.p95).padStart(10)}  max ${ms(
+        s.max,
+      ).padStart(10)}  ${derivations}`,
+    );
+  }
+}
+
+/**
+ * What the model said it would do, and how long each of those took. An
+ * observation of the model's own plan, never a bar it is graded against.
+ */
+/**
+ * The estimate for one goal, gathering the two things it can be built from.
+ *
+ * Shared by `goal show` and the Stop hook's capacity line so both report the same
+ * number — the same reason `check` is resolved in one place.
+ */
+function goalEstimate(sessionId, goal) {
+  if (!goal) return null;
+  try {
+    const eta = require('../src/lib/eta');
+    const taskState = require('../src/lib/tasks').state(sessionId);
+
+    let coverage = null;
+    if (goal.projectRoot && (goal.criteria || []).length) {
+      const evidence = require('../src/lib/evidence');
+      const { worktreeStamp } = require('../src/lib/stamp');
+      coverage = evidence.coverage(
+        evidence.read(goal.projectRoot, { objectiveHash: evidence.objectiveHash(goal.objective) }),
+        goal.criteria.length,
+        worktreeStamp(goal.projectRoot),
+      );
+    }
+    return eta.estimate(goal, { taskState, coverage });
+  } catch {
+    return null;
+  }
+}
+
+function cmdTasks(flags) {
+  const sessionId = resolveSession(flags);
+  if (!sessionId) {
+    fail('no session found. Pass --session <id>.');
+    return;
+  }
+
+  const result = require('../src/lib/tasks').state(sessionId);
+  if (flags.json) {
+    out(JSON.stringify(result, null, 2));
+    return;
+  }
+  if (!result) {
+    out('No task list recorded for this session.');
+    return;
+  }
+
+  out(`tasks for ${sessionId}`);
+  out(
+    `  ${result.completed}/${result.total} complete` +
+      `${result.inProgress ? `, ${result.inProgress} in progress` : ''}` +
+      `${result.pending ? `, ${result.pending} pending` : ''}` +
+      `${result.dropped ? `, ${result.dropped} dropped` : ''}`,
+  );
+  if (result.durations.length) {
+    const sorted = [...result.durations].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    out(`  ${result.durations.length} measured, median ${formatDuration(median)}`);
+    if (result.fuzzyDurations) out(`  ${result.fuzzyDurations} of those came from a guessed match`);
+  } else {
+    out('  no durations yet — a task needs to go in_progress and then completed');
+  }
+  out('');
+  for (const task of result.tasks) {
+    const took = task.activeMs == null ? '' : `  (${formatDuration(task.activeMs)})`;
+    out(`  [${task.status.padEnd(11)}] ${String(task.title || task.taskId).slice(0, 68)}${took}`);
+  }
 }
 
 function cmdInspect(flags) {
@@ -1049,6 +1219,10 @@ function main(argv) {
       return cmdVerify(flags);
     case 'inspect':
       return cmdInspect(flags);
+    case 'durations':
+      return cmdDurations(flags);
+    case 'tasks':
+      return cmdTasks(flags);
     case 'preview':
       return cmdPreview(flags);
     case 'prompt':
