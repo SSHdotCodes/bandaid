@@ -21,6 +21,7 @@
  *   node eval/loop.js --rounds 8
  *   node eval/loop.js --ablate completion-audit    withhold a prompt block
  *   node eval/loop.js --ablate ledger              withhold the accumulated evidence
+ *   node eval/loop.js --ablate seal                withhold the held-out check
  *   node eval/loop.js --judge                      let judged fixtures run the judge
  *   node eval/loop.js --json
  *
@@ -54,6 +55,13 @@ const STOP = path.join(ROOT, 'src', 'hooks', 'stop.js');
 const CLI = path.join(ROOT, 'bin', 'bandaid.js');
 
 const DEFAULT_MAX_ROUNDS = 6;
+
+/**
+ * Mechanisms withheld by not configuring them, rather than by BANDAID_ABLATE.
+ * Neither is a prompt block, so naming them to the prompt ablator would do
+ * nothing at all and report a clean result for a run that changed nothing.
+ */
+const ABLATED_BY_ABSENCE = new Set(['ledger', 'seal']);
 
 function parseArgs(argv) {
   const flags = { filter: null, rounds: DEFAULT_MAX_ROUNDS, ablate: null, json: false, judge: false };
@@ -98,6 +106,7 @@ function loadFixture(dir) {
     objective,
     criteria,
     check: readIfPresent(path.join(base, 'check.sh')),
+    seal: readIfPresent(path.join(base, 'seal.sh')),
     expected: JSON.parse(readIfPresent(path.join(base, 'expected.json')) || '{}'),
     repo: path.join(base, 'repo'),
     roundsDir,
@@ -122,6 +131,11 @@ function sandbox(fixture) {
   if (fixture.check) {
     fs.writeFileSync(path.join(repo, 'check.sh'), `${fixture.check}\n`);
     fs.chmodSync(path.join(repo, 'check.sh'), 0o755);
+  }
+
+  if (fixture.seal) {
+    fs.writeFileSync(path.join(repo, 'seal.sh'), `${fixture.seal}\n`);
+    fs.chmodSync(path.join(repo, 'seal.sh'), 0o755);
   }
 
   return { repo, home };
@@ -222,7 +236,12 @@ function readGoal(home) {
 function endedBy(goal, released) {
   if (!goal) return 'no-goal';
   if (goal.status === 'complete') return /check passed/i.test(goal.note || '') ? 'check' : 'complete';
-  if (goal.status === 'blocked') return /constraint/i.test(goal.note || '') ? 'violation' : 'blocker';
+  if (goal.status === 'blocked') {
+    // Three different things end as `blocked`, and collapsing them would hide the
+    // one this fixture set exists to show: a goal whose visible check went green.
+    if (goal.sealFailure) return 'seal';
+    return /constraint/i.test(goal.note || '') ? 'violation' : 'blocker';
+  }
   if (goal.status === 'budget_limited') {
     if (goal.plateau >= 2) return 'plateau';
     if ((goal.stalls || 0) >= 2) return 'stall';
@@ -238,11 +257,12 @@ function runFixture(fixture, flags) {
     // A generous cap: this harness is measuring what ends a loop, so the round
     // count must not be the thing that does it unless nothing else will.
     BANDAID_MAX_CONTINUATIONS: String(flags.rounds * 3),
-    // `ledger` is not a prompt block, so it is withheld by clearing the file rather
-    // than by BANDAID_ABLATE. Passing it through would name a block that does not
-    // exist and silently do nothing.
-    ...(flags.ablate && flags.ablate !== 'ledger' ? { BANDAID_ABLATE: flags.ablate } : {}),
+    // `ledger` and `seal` are not prompt blocks, so they are withheld by not
+    // supplying them rather than by BANDAID_ABLATE. Passing either through would
+    // name a block that does not exist and silently do nothing.
+    ...(flags.ablate && !ABLATED_BY_ABSENCE.has(flags.ablate) ? { BANDAID_ABLATE: flags.ablate } : {}),
     ...(fixture.check ? { BANDAID_GOAL_CHECK: 'bash ./check.sh' } : {}),
+    ...(fixture.seal && flags.ablate !== 'seal' ? { BANDAID_GOAL_SEAL: 'bash ./seal.sh' } : {}),
     // Twice opt-in: the fixture has to declare it wants a judge *and* the run has to
     // pass --judge. The judge costs a subprocess and 12–16s per stop and needs
     // `claude` on PATH, so the default run stays fast, offline and deterministic.
@@ -396,7 +416,7 @@ function main() {
   // coverage hole read as a deletion candidate.
   const counts = {};
   for (const r of graded) if (r.endedBy) counts[r.endedBy] = (counts[r.endedBy] || 0) + 1;
-  const all = ['check', 'complete', 'stall', 'plateau', 'blocker', 'violation', 'budget', 'rounds-exhausted'];
+  const all = ['check', 'complete', 'stall', 'plateau', 'blocker', 'seal', 'violation', 'budget', 'rounds-exhausted'];
   const covered = new Set(graded.flatMap((r) => (r.expected && r.expected.covers) || []));
 
   console.log('');

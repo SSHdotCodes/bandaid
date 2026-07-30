@@ -5,7 +5,17 @@ const { describe, it } = require('node:test');
 
 const { DEFAULTS } = require('../src/lib/config');
 const { newGoal, plateauReached, recordReason } = require('../src/lib/goals');
-const { assess, evidenceFromTurns, judgePrompt, parseVerdict, runCheck } = require('../src/lib/verify');
+const {
+  assess,
+  criteriaPrompt,
+  evidenceFromTurns,
+  judgePrompt,
+  parseCriteria,
+  parseVerdict,
+  runCheck,
+  runCriteria,
+  runSeal,
+} = require('../src/lib/verify');
 
 const withGoals = (patch) => ({ ...DEFAULTS, goals: { ...DEFAULTS.goals, ...patch } });
 
@@ -38,6 +48,102 @@ describe('runCheck', () => {
   });
 });
 
+describe('runSeal', () => {
+  it('reports a passing command', () => {
+    assert.equal(runSeal('exit 0').ok, true);
+  });
+
+  it('is null when no seal is configured', () => {
+    assert.equal(runSeal(null), null);
+    assert.equal(runSeal('   '), null);
+  });
+
+  it('fails closed on a command that cannot run', () => {
+    assert.equal(runSeal('definitely-not-a-real-command-xyz').ok, false);
+  });
+
+  it('fails closed on a hang rather than hanging the session', () => {
+    assert.equal(runSeal('sleep 30', { timeoutMs: 250 }).ok, false);
+  });
+});
+
+/**
+ * The tier whose whole contract is about what does *not* come back.
+ *
+ * Every assertion here that looks like a formality — `reason` is a constant,
+ * `verification.output` is null — is the actual product. A seal that leaks its
+ * finding into the continuation is a `check` with extra steps, and the leak would
+ * be invisible in review because the loop would still behave sensibly.
+ */
+describe('the seal', () => {
+  const goal = newGoal('Migrate auth off JWT');
+  const sealed = (patch, spawn = {}) => assess({ goal, config: withGoals(patch), turns: [], spawn });
+
+  it('does not run at all on a round that was not going to close the goal', () => {
+    let ran = false;
+    const result = sealed({ check: 'exit 1', seal: 'exit 1' }, { runSeal: () => { ran = true; return { ok: false, output: 'x' }; } });
+    assert.equal(ran, false, 'a seal the worker can trigger every round is a per-round oracle');
+    assert.equal(result.proven, false);
+    assert.equal(result.sealed, undefined);
+  });
+
+  it('lets a passing check close the goal when the seal agrees', () => {
+    const result = sealed({ check: 'exit 0', seal: 'exit 0' });
+    assert.equal(result.proven, true);
+    assert.equal(result.verification.source, 'check');
+  });
+
+  it('refuses the close when the visible check passes and the held-out one does not', () => {
+    const result = sealed({ check: 'exit 0', seal: 'exit 1' });
+    assert.equal(result.proven, false, 'this is the SpecBench shape: the visible suite is green and compliance is not');
+    assert.equal(result.sealed, true);
+  });
+
+  it('refuses the close when the judge says complete and the seal does not', () => {
+    const result = sealed({ judge: true, seal: 'exit 1' }, { runJudge: () => ({ verdict: 'complete', reason: 'all four endpoints exist' }) });
+    assert.equal(result.proven, false);
+    assert.equal(result.sealed, true);
+  });
+
+  it('tells the model nothing: the reason is a constant and carries no output', () => {
+    const loud = 'HOLDOUT-CANARY: composed JOIN+GROUP BY returns 0 rows';
+    const result = sealed({ check: 'exit 0', seal: `echo "${loud}"; exit 1` });
+
+    assert.equal(result.reason, 'held-out verification did not pass');
+    assert.equal(result.verification.output, null);
+    assert.doesNotMatch(JSON.stringify(result.verification), /CANARY/, 'verification is what continuationPrompt renders from');
+    assert.doesNotMatch(String(result.reason), /CANARY/);
+  });
+
+  it('keeps the finding for the user on a field the prompts never read', () => {
+    const result = sealed({ check: 'exit 0', seal: 'echo "12 held-out cases failed"; exit 1' });
+    assert.match(result.sealOutput, /12 held-out cases failed/);
+    assert.equal(result.sealCommand, 'echo "12 held-out cases failed"; exit 1');
+  });
+
+  it('fails closed: a seal that cannot run has not cleared anything', () => {
+    const result = sealed({ check: 'exit 0', seal: 'definitely-not-a-real-command-xyz' });
+    assert.equal(result.proven, false, 'silence is not evidence here either');
+    assert.equal(result.sealed, true);
+  });
+
+  it('prefers the goal\'s own seal over the global one', () => {
+    const result = assess({
+      goal: { ...goal, seal: 'exit 1' },
+      config: withGoals({ check: 'exit 0', seal: 'exit 0' }),
+      turns: [],
+    });
+    assert.equal(result.sealed, true);
+  });
+
+  it('is byte-identical to no seal at all when none is configured', () => {
+    const without = assess({ goal, config: withGoals({ check: 'exit 0' }), turns: [] });
+    const withNull = assess({ goal, config: withGoals({ check: 'exit 0', seal: null }), turns: [] });
+    assert.deepEqual(withNull, without);
+    assert.equal(without.proven, true);
+  });
+});
+
 describe('parseVerdict', () => {
   it('reads the two-line contract', () => {
     const parsed = parseVerdict('VERDICT: continue\nREASON: the migration misses src/legacy.ts');
@@ -53,6 +159,59 @@ describe('parseVerdict', () => {
   it('returns no opinion when the contract is not followed', () => {
     assert.equal(parseVerdict('looks good to me'), null);
     assert.equal(parseVerdict(''), null);
+  });
+});
+
+describe('runCriteria', () => {
+  it('abstains rather than inventing a bar when it cannot run', () => {
+    const derived = runCriteria({ objective: 'Port the retry logic', cli: 'definitely-not-a-real-cli-xyz' });
+    assert.equal(derived, null, 'null is the signal to fall back and say so, not a rubric of zero');
+  });
+
+  it('has no opinion without an objective', () => {
+    assert.equal(runCriteria({ objective: '' }), null);
+  });
+});
+
+describe('parseCriteria', () => {
+  it('reads a numbered list', () => {
+    const parsed = parseCriteria('1. npm test exits 0\n2. src/client.js no longer imports retryLegacy');
+    assert.deepEqual(parsed, ['npm test exits 0', 'src/client.js no longer imports retryLegacy']);
+  });
+
+  it('reads a bulleted list', () => {
+    assert.deepEqual(parseCriteria('- one thing\n* another thing'), ['one thing', 'another thing']);
+  });
+
+  it('tolerates a preamble the prompt asked it not to write', () => {
+    const parsed = parseCriteria('Here are the criteria:\n\n1. the endpoint returns 204\n2. the old route is gone');
+    assert.deepEqual(parsed, ['the endpoint returns 204', 'the old route is gone']);
+  });
+
+  it('caps at five, because the bar is a rubric and not a backlog', () => {
+    const parsed = parseCriteria([1, 2, 3, 4, 5, 6, 7].map((n) => `${n}. criterion ${n}`).join('\n'));
+    assert.equal(parsed.length, 5);
+  });
+
+  it('has no opinion when the contract is not followed', () => {
+    assert.equal(parseCriteria('I would suggest making sure the tests pass.'), null);
+    assert.equal(parseCriteria(''), null);
+  });
+});
+
+describe('criteriaPrompt', () => {
+  const rendered = criteriaPrompt('Port the retry logic to the new client');
+
+  it('tells the author it has no stake in the work', () => {
+    assert.match(rendered, /will not do the work and you will not be graded/i);
+  });
+
+  it('names the failure it exists to prevent', () => {
+    assert.match(rendered, /individually reasonable and collectively smaller/i);
+  });
+
+  it('carries the objective as written', () => {
+    assert.match(rendered, /Port the retry logic to the new client/);
   });
 });
 

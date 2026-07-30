@@ -1,0 +1,3 @@
+src/report.js uses parseNext instead of parseLegacy
+src/ingest.js uses parseNext instead of parseLegacy
+npm test exits 0

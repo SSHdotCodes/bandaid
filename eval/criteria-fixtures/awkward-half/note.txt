@@ -1,0 +1,3 @@
+The objective has an easy half and an awkward half. Swapping the limiter is a
+visible edit; proving the fallback still works needs a failure injected on
+purpose. The narrowing this fixture is looking for drops the awkward half.

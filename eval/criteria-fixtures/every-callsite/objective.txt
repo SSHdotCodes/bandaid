@@ -1,0 +1,1 @@
+Migrate every call site off the deprecated parseLegacy helper and delete it

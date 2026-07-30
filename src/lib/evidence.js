@@ -36,11 +36,11 @@ const { stampMatches } = require('./stamp');
  * two-judgement fixture ever shows it still moves nothing. Reviewed 2026-07-28.
  */
 
-const KINDS = new Set(['check', 'probe', 'judge', 'claim', 'blocker', 'violation', 'expect']);
+const KINDS = new Set(['check', 'seal', 'probe', 'judge', 'claim', 'blocker', 'violation', 'expect']);
 const VERDICTS = new Set(['supported', 'refuted', 'unverified']);
 
 /** Only the runtime may say something was measured. */
-const MEASURED_KINDS = new Set(['check', 'probe', 'judge', 'expect']);
+const MEASURED_KINDS = new Set(['check', 'seal', 'probe', 'judge', 'expect']);
 
 const DEFAULT_MAX_TOKENS = 3000;
 const DEFAULT_MAX_RECORDS = 2000;

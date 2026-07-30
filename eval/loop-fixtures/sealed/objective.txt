@@ -1,0 +1,1 @@
+Implement query() so it supports filtering and grouping together

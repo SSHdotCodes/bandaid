@@ -1,0 +1,3 @@
+src/limiter.js exports a Redis-backed limiter
+the server uses the Redis limiter on startup
+npm test exits 0

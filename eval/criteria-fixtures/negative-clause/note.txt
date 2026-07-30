@@ -1,0 +1,3 @@
+Two negative clauses after one positive one. Criteria written by the party doing
+the work tend to encode the goal and not the guardrails, because the guardrails
+are things you simply intend not to do.

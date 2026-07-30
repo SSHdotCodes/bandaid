@@ -1,0 +1,5 @@
+[
+  {"id": "redis", "why": "the swap itself, which is the easy half", "match": ["redis"]},
+  {"id": "fallback", "why": "the awkward half: behaviour when Redis is down", "match": ["fallback", "unreachable", "unavailable", "redis is down", "connection fail"]},
+  {"id": "callers", "why": "the in-memory limiter must stop being used", "match": ["in-memory", "inmemory", "call site", "callsite", "no longer (uses|references)", "memorylimiter"]}
+]

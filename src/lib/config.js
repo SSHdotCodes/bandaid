@@ -93,6 +93,27 @@ const DEFAULTS = {
     // Set per goal with `bandaid goal set ... --check`, or globally here.
     check: null,
 
+    // A second check the worker is never shown and never steered by.
+    //
+    // `check` is a signal the model can see: its command is in the goal record
+    // and its output comes back as the continuation's reason, which is the point
+    // — that is what makes it useful feedback. It is also what makes it a target.
+    // SpecBench measures the gap between a visible suite and a held-out one at
+    // roughly 27 points per tenfold increase in code size, reaching 100 on the
+    // largest tasks; METR finds reward hacking in 30% of runs by default and
+    // 70-95% after the model is told not to. A signal the worker optimises
+    // against stops measuring what it was chosen to measure.
+    //
+    // So the seal runs only on a round that is otherwise about to close the goal,
+    // and nothing it produces reaches the model: not the command, not the output,
+    // not a reason derived from either. On failure the goal blocks rather than
+    // continuing, because continuing would mean saying why.
+    //
+    // What this is not: secret. goal.json is on disk and the worker has a shell.
+    // It defends against drift toward the visible signal, not against a worker
+    // that goes looking. See README's honest limits.
+    seal: null,
+
     // Ask a separate read-only Claude to verify against the worktree before a
     // goal is allowed to close. Costs a subprocess and a few seconds per stop.
     judge: false,
@@ -241,6 +262,7 @@ function envOverrides() {
     if (ms != null) goals.timeBudgetMs = ms;
   }
   if (process.env.BANDAID_GOAL_CHECK) goals.check = process.env.BANDAID_GOAL_CHECK;
+  if (process.env.BANDAID_GOAL_SEAL) goals.seal = process.env.BANDAID_GOAL_SEAL;
   const autonomy = bool('BANDAID_AUTONOMY');
   if (autonomy !== undefined) goals.autonomy = autonomy;
   const judge = bool('BANDAID_JUDGE');

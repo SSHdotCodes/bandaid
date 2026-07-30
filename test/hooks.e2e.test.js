@@ -745,6 +745,53 @@ describe('an objective that outlives its session', () => {
   });
 });
 
+/**
+ * The seal, end to end, asserted on what does not come out.
+ *
+ * Every other test in this file checks that something reaches the model. This one
+ * checks the opposite, and it is the only test that can: the unit tests pin
+ * `assess`'s return shape, and the snapshot pins the prompt's text, but neither
+ * runs the path where a real command's real output travels through a real goal
+ * record into real stderr. The canary is what makes that traversal falsifiable.
+ */
+describe('a held-out check', () => {
+  const SEALED = 'sealed-session-0001';
+  const CANARY = 'HOLDOUT-CANARY-9f2a';
+
+  it('refuses the close when the visible check passes, and tells the model nothing', () => {
+    cli([
+      'goal', 'set', '--session', SEALED, '--cwd', ROOT,
+      '--check', 'exit 0',
+      '--seal', `echo "${CANARY}"; exit 1`,
+      '--', 'Make the composed query path work',
+    ]);
+    runHook('post-tool-batch.js', {
+      session_id: SEALED,
+      cwd: ROOT,
+      tool_calls: [{ tool_name: 'Edit', tool_input: { file_path: '/repo/src/query.js' }, tool_response: 'Applied 1 edit' }],
+    });
+
+    const stop = runHook('stop.js', { session_id: SEALED, cwd: ROOT, stop_hook_active: false });
+
+    assert.equal(stop.code, 2, 'the goal blocks rather than closing on a green visible check');
+    assert.match(stop.stderr, /held-out check/i, 'the model is told the goal is blocked');
+    assert.doesNotMatch(stop.stderr, new RegExp(CANARY), 'the finding must not reach the model');
+    assert.doesNotMatch(stop.stderr, /exit 1/, 'nor the command that produced it');
+  });
+
+  it('records the finding for the user, on the same run', () => {
+    const shown = cli(['goal', 'show', '--session', SEALED]);
+    assert.match(shown, new RegExp(CANARY), 'the user is the reader it was withheld for');
+    assert.match(shown, /held-out check refused the close/);
+  });
+
+  it('does not block again: the loop is over, not paused', () => {
+    const again = runHook('stop.js', { session_id: SEALED, cwd: ROOT, stop_hook_active: false });
+    assert.equal(again.code, 0, 'a blocked goal is terminal, so the next stop goes through');
+    assert.equal(again.stderr.trim(), '');
+  });
+});
+
 describe('hook robustness', () => {
   it('survives empty, malformed, and hostile input without failing the session', () => {
     for (const script of ['user-prompt-submit.js', 'post-tool-batch.js', 'pre-compact.js', 'post-compact.js', 'session-start.js', 'stop.js']) {

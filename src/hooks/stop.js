@@ -24,7 +24,7 @@ const ledger = require('../lib/ledger');
 const store = require('../lib/store');
 const verify = require('../lib/verify');
 const { approxTokenCount } = require('../lib/tokens');
-const { budgetLimitPrompt, continuationPrompt, probePendingPrompt, violationPrompt } = require('../lib/prompts');
+const { budgetLimitPrompt, continuationPrompt, probePendingPrompt, sealPrompt, violationPrompt } = require('../lib/prompts');
 const { emitBlocking, runHook } = require('../lib/hookio');
 
 /**
@@ -207,6 +207,32 @@ runHook('Stop', ({ input, config }) => {
       note: assessment.reason,
     });
     return 0;
+  }
+
+  // Everything the worker could see said done, and the held-out check said no.
+  //
+  // Terminal for the same reason a violation is, but the reason is different and
+  // worth keeping straight: a violation cannot be fixed by another turn, while
+  // this one could be — except that steering the next turn would mean handing over
+  // the finding, and a seal the worker is steered by is just a slow `check`. So
+  // the loop ends here and the finding goes to the user instead.
+  //
+  // `sealOutput` is stored, never injected. `note` carries only the constant
+  // reason, because notes surface in project records that later sessions read.
+  if (assessment.sealed) {
+    goals.saveGoal(sessionId, {
+      ...decision.goal,
+      status: 'blocked',
+      tokensUsed,
+      note: assessment.reason,
+      sealFailure: {
+        at: new Date(now).toISOString(),
+        command: assessment.sealCommand || null,
+        output: assessment.sealOutput || null,
+      },
+    });
+    emitBlocking(sealPrompt(decision.goal, { showCommand: goals.showCommand(sessionId) }));
+    return 2;
   }
 
   // A constraint in the objective has already been broken. Another turn cannot

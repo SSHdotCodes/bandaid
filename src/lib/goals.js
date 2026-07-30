@@ -178,6 +178,10 @@ function blockCommand(sessionId) {
   return `node ${JSON.stringify(cliPath())} goal block --session ${sessionId} "what is blocked and what would unblock it"`;
 }
 
+function showCommand(sessionId) {
+  return `node ${JSON.stringify(cliPath())} goal show --session ${sessionId}`;
+}
+
 /** Criteria are data, not prose: trimmed, de-duplicated, empties dropped. */
 function normalizeCriteria(criteria) {
   const seen = new Set();
@@ -232,6 +236,7 @@ function newGoal(
     timeBudgetMs = null,
     turnIndex = 0,
     check = null,
+    seal = null,
     criteria = [],
     cwd = null,
     probes = null,
@@ -298,6 +303,13 @@ function newGoal(
     // the configured default. Exit 0 is the only thing that closes a goal
     // without the model's say-so.
     check,
+    // The held-out counterpart, or null. Same contract as `check` and the exact
+    // opposite exposure: it runs only when the goal is otherwise about to close,
+    // and nothing it produces is ever injected. See config.js for why.
+    seal,
+    // What the seal found, when it refused. Written for the user and read by
+    // `goal show`; never rendered into a prompt.
+    sealFailure: null,
     // The probes armed for this goal, frozen when it was set so a manifest
     // edited mid-goal cannot retroactively move the bar. null means "not
     // frozen" — a goal that predates the manifest takes it as it stands.
@@ -526,6 +538,7 @@ function adoptHandoff(sessionId, cwd, config, { turnIndex = 0 } = {}) {
       cwd,
       turnIndex,
       check: carried.check ?? null,
+      seal: carried.seal ?? null,
     }),
     criteria: carried.criteria || [],
     criteriaSource: carried.criteriaSource || null,
@@ -537,6 +550,9 @@ function adoptHandoff(sessionId, cwd, config, { turnIndex = 0 } = {}) {
     baseSha: carried.baseSha ?? null,
     createdAt: carried.createdAt,
     check: carried.check ?? null,
+    // Carried for the same reason the criteria are: the bar a goal was set
+    // against must not soften because a new day picked it up.
+    seal: carried.seal ?? null,
     adoptedFrom: record.sessionId || null,
   };
   adopted.maxContinuations = resolveMaxContinuations(config, adopted);
@@ -674,6 +690,7 @@ module.exports = {
   decideOnStop,
   endsWithQuestionToUser,
   evidenceCommand,
+  showCommand,
   isGoalWorthy,
   loadGoal,
   newGoal,

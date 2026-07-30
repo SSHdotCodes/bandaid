@@ -1,0 +1,3 @@
+A quantifier and a disposal. "Every call site" invites a criterion about the
+migration and none about completeness, and "delete it" is the clause that gets
+dropped because the work feels done once nothing calls it.
