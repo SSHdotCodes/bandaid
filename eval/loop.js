@@ -23,25 +23,33 @@
  *   node eval/loop.js --ablate ledger              withhold the accumulated evidence
  *   node eval/loop.js --ablate seal                withhold the held-out check
  *   node eval/loop.js --judge                      let judged fixtures run the judge
+ *   node eval/loop.js --worker claude              a model reads the prompt (brief 13)
+ *   node eval/loop.js --worker claude --samples 5  and reads it five times
  *   node eval/loop.js --json
  *
  * The default run is offline, deterministic and about 17 seconds. `--judge` costs a
  * subprocess and 12–16s per stop and needs `claude` on PATH, so it is opt-in twice:
  * the fixture declares `"judge": true` and the run passes the flag.
  *
- * ## What it cannot measure, stated up front
+ * ## Two workers, and what each one may be quoted for
  *
- * The worker is a **script**, not a model. Each fixture ships a sequence of
- * mutations that stands in for what a model would do, which makes the harness
- * deterministic, free, and reviewable — and means it measures the loop's
- * *mechanics*: when it blocks, when it releases, what ends it. A prose block that
- * only changes what a model chooses to do is invisible here.
+ * The default worker is a **script**. Each fixture ships a sequence of mutations that
+ * stands in for what a model would do, which makes the harness deterministic, free,
+ * and reviewable — and means it measures the loop's *mechanics*: when it blocks, when
+ * it releases, what ends it. A prose block that only changes what a model chooses to
+ * do is invisible to it, because a script does not read the prompt.
  *
- * So `--ablate completion-audit` answers "does withholding the audit change the
- * loop's decisions, given a fixed worker" — a real question with a real answer, and
- * a strictly weaker claim than "the audit makes models more honest". Nothing here
- * should be quoted as the latter. `--worker claude` is the tier that would measure
- * prose properly; it is deliberately not built.
+ * So `--ablate completion-audit` on the scripted tier answers "does withholding the
+ * audit change the loop's decisions, given a fixed worker" — a real question with a
+ * real answer, and a strictly weaker claim than "the audit makes models more honest".
+ * Nothing from that tier may be quoted as the latter.
+ *
+ * `--worker claude` is the tier that can be. It hands the model the objective on
+ * round 1 and the previous stop's continuation prompt — verbatim — on every round
+ * after, so withholding a block genuinely changes what was read. Opt-in twice like
+ * the judge (`"worker": true` in the fixture, plus the flag), it costs real money and
+ * it is nondeterministic, which is what `--samples` is for. One run of it is an
+ * anecdote; docs/plans/13-model-worker.md states what may be claimed from it.
  */
 
 const fs = require('node:fs');
@@ -56,6 +64,19 @@ const CLI = path.join(ROOT, 'bin', 'bandaid.js');
 
 const DEFAULT_MAX_ROUNDS = 6;
 
+/** One run of a nondeterministic worker is an anecdote. Five is a rate. */
+const DEFAULT_MODEL_SAMPLES = 5;
+
+/**
+ * Per-round wall clock for the model worker, generous on purpose.
+ *
+ * A worker killed mid-edit produces a round that changed nothing, which is
+ * indistinguishable in the results from a model that chose not to act — and that is
+ * the one confound capable of corrupting both arms of an ablation without saying so.
+ * Better to wait than to record a timeout as a decision.
+ */
+const DEFAULT_WORKER_TIMEOUT_MS = 300_000;
+
 /**
  * Mechanisms withheld by not configuring them, rather than by BANDAID_ABLATE.
  * Neither is a prompt block, so naming them to the prompt ablator would do
@@ -64,15 +85,39 @@ const DEFAULT_MAX_ROUNDS = 6;
 const ABLATED_BY_ABSENCE = new Set(['ledger', 'seal']);
 
 function parseArgs(argv) {
-  const flags = { filter: null, rounds: DEFAULT_MAX_ROUNDS, ablate: null, json: false, judge: false };
+  const flags = {
+    filter: null,
+    rounds: DEFAULT_MAX_ROUNDS,
+    ablate: null,
+    json: false,
+    judge: false,
+    worker: null,
+    workerModel: 'haiku',
+    workerTimeoutMs: DEFAULT_WORKER_TIMEOUT_MS,
+    samples: null,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--json') flags.json = true;
     else if (argv[i] === '--judge') flags.judge = true;
     else if (argv[i] === '--filter') flags.filter = argv[i + 1];
     else if (argv[i] === '--rounds') flags.rounds = Number(argv[i + 1]) || DEFAULT_MAX_ROUNDS;
     else if (argv[i] === '--ablate') flags.ablate = argv[i + 1];
+    else if (argv[i] === '--worker') flags.worker = argv[i + 1];
+    else if (argv[i] === '--worker-model') flags.workerModel = argv[i + 1];
+    else if (argv[i] === '--worker-timeout') {
+      flags.workerTimeoutMs = (Number(argv[i + 1]) || DEFAULT_WORKER_TIMEOUT_MS / 1000) * 1000;
+    } else if (argv[i] === '--samples') flags.samples = Number(argv[i + 1]) || 1;
   }
+  // Sampling only means something against a worker that can disagree with itself. The
+  // scripted tier is deterministic, so its default stays exactly one pass — which is
+  // what keeps `npm run loop` at ~17s and its --json shape byte-identical to before.
+  if (flags.samples == null) flags.samples = flags.worker ? DEFAULT_MODEL_SAMPLES : 1;
   return flags;
+}
+
+/** A fixture is model-driven only if the run asked for it *and* the fixture opted in. */
+function modelDriven(fixture, flags) {
+  return flags.worker === 'claude' && fixture.expected.worker === true;
 }
 
 function readIfPresent(file) {
@@ -218,6 +263,63 @@ function applyRound(fixture, repo, script, home) {
   }
 }
 
+/**
+ * One round of work done by a model instead of by a script.
+ *
+ * The prompt is the entire point of this tier. Round 1 gets the objective — what a
+ * user types before the goal is set — and every round after gets the previous stop's
+ * stderr *verbatim*: the continuation prompt, with whatever `--ablate` withheld
+ * genuinely missing from it. Paraphrasing or reconstructing it here would measure a
+ * prompt nobody ships.
+ */
+function runWorker({ prompt, repo, home, model, timeoutMs, cli = 'claude' }) {
+  const workerEnv = {
+    ...process.env,
+    // The worker is itself a Claude Code session and would otherwise fire the very
+    // hook under test on its own stop. Same guard runJudge and runCriteria take.
+    BANDAID_ENABLED: '0',
+    // The continuation prompt hands the model absolute `bandaid goal block` and
+    // `goal complete` commands, and those read and write session state. Without this
+    // they would resolve to the developer's real ~/.claude/bandaid: the harness would
+    // report "the model never recorded a blocker" when it had, and the run would
+    // scribble on live state to do it. The sandbox home is not an optimisation here.
+    BANDAID_HOME: home,
+  };
+  // The harness's session id must not leak into the worker's own session. The prompt's
+  // commands carry `--session` explicitly, so nothing needs it.
+  delete workerEnv.CLAUDE_SESSION_ID;
+
+  const result = spawnSync(
+    cli,
+    [
+      '-p',
+      prompt,
+      '--model',
+      model,
+      // A worker that stops to ask has produced nothing, and a round that produced
+      // nothing is indistinguishable from a model that chose not to act.
+      '--permission-mode',
+      'bypassPermissions',
+      // The inverse of the judge's allowlist: the judge inspects and never edits, so
+      // the worker is the one that has to. Task/Agent stay out because a subagent
+      // would not inherit the guard above.
+      '--allowedTools',
+      'Read Grep Glob Edit Write Bash',
+      '--disallowedTools',
+      'Task Agent WebFetch WebSearch',
+    ],
+    { cwd: repo, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, env: workerEnv },
+  );
+
+  // A model that decides to do nothing is data. A worker that could not run is not,
+  // and reading the second as the first is how a broken tier reports a confident null.
+  if (result.error) throw new Error(`worker could not run: ${result.error.message}`);
+  if (result.status !== 0) {
+    throw new Error(`worker exited ${result.status}: ${(result.stderr || '').slice(0, 300)}`);
+  }
+  return result.stdout || '';
+}
+
 function readGoal(home) {
   try {
     return JSON.parse(fs.readFileSync(path.join(home, 'sessions', SESSION, 'goal.json'), 'utf8'));
@@ -282,10 +384,24 @@ function runFixture(fixture, flags) {
     let released = false;
     let round = 0;
     const log = [];
+    const useModel = modelDriven(fixture, flags);
+    // Round 1 is handed what a user types. Every round after is handed the previous
+    // stop's continuation prompt, unmodified.
+    let prompt = fixture.objective;
 
     while (round < flags.rounds) {
       // Work happens, then the turn tries to end — the real order.
-      if (fixture.rounds[round]) applyRound(fixture, repo, fixture.rounds[round], home);
+      if (useModel) {
+        runWorker({
+          prompt,
+          repo,
+          home,
+          model: flags.workerModel,
+          timeoutMs: flags.workerTimeoutMs,
+        });
+      } else if (fixture.rounds[round]) {
+        applyRound(fixture, repo, fixture.rounds[round], home);
+      }
       round += 1;
 
       // A batch of tool calls, so the turn is not "trivial" and is worth auditing.
@@ -312,11 +428,20 @@ function runFixture(fixture, flags) {
         released = true;
         break;
       }
+
+      // The next round reads exactly what this stop wrote. A blocked stop that wrote
+      // no prompt is a harness fault, not a quiet round: it would hand the model the
+      // *previous* round's prompt and report the result as if nothing had changed.
+      if (useModel) {
+        if (!stop.stderr.trim()) throw new Error(`round ${round} blocked but wrote no continuation prompt`);
+        prompt = stop.stderr;
+      }
     }
 
     const goal = readGoal(home);
     return {
       name: fixture.name,
+      worker: useModel ? 'claude' : 'script',
       released,
       rounds: round,
       status: goal ? goal.status : null,
@@ -362,8 +487,99 @@ function grade(result) {
   return problems;
 }
 
+/**
+ * Fold N samples of one fixture into a single row.
+ *
+ * A one-sample row is today's row exactly, plus `sampleCount`. Existing readers —
+ * test/loop-harness.test.js reaches for `results[0].log[0].stderrWords` — must keep
+ * working, so the extra fields appear only when there is more than one sample to
+ * describe.
+ */
+function aggregate(samples, worker) {
+  const first = samples[0];
+  // Stamped from the run's configuration, not read off the first sample: a sample that
+  // threw carries no `worker`, and grading the whole row as scripted because its first
+  // attempt errored would apply a script's expectations to a model.
+  if (samples.length === 1) return { ...first, worker, sampleCount: 1 };
+
+  const ok = samples.filter((s) => !s.error);
+  const endedByCounts = {};
+  const statuses = {};
+  for (const s of ok) {
+    endedByCounts[s.endedBy] = (endedByCounts[s.endedBy] || 0) + 1;
+    statuses[String(s.status)] = (statuses[String(s.status)] || 0) + 1;
+  }
+
+  return {
+    ...first,
+    worker,
+    sampleCount: samples.length,
+    errored: samples.length - ok.length,
+    releaseRate: ok.length ? ok.filter((s) => s.released).length / ok.length : null,
+    roundsMean: ok.length ? ok.reduce((sum, s) => sum + s.rounds, 0) / ok.length : null,
+    statuses,
+    endedByCounts,
+    samples,
+  };
+}
+
+/**
+ * The same expectations, read against a model.
+ *
+ * Every `expected.json` in this suite describes what a *scripted* worker does, because
+ * that is all there was to describe. `byRound: 3` is the clearest case: it is the pace
+ * of `converging`'s three round scripts, not a property of the loop. A real model
+ * implemented the same objective in one round on the first smoke run and was graded as
+ * a failure for it, which is the expectation being wrong rather than the run.
+ *
+ * So a model-driven fixture is graded this way at *any* sample count, and the split is
+ * by worker rather than by sample count:
+ *
+ * - `byRound` is dropped. A faster close is not a regression.
+ * - `releases` and `status` become "at least one sample reached this", a distribution.
+ * - `notStatus` stays absolute. A false close in even one sample is the finding this
+ *   fixture set exists to catch, and averaging it into a rate would hide exactly the
+ *   thing being measured.
+ */
+function gradeSamples(entry) {
+  const want = entry.expected || {};
+  // A one-sample model run still has a distribution; it just has one point in it.
+  const samples = entry.samples || [entry];
+  const ok = samples.filter((s) => !s.error);
+  const problems = [];
+
+  for (const s of samples) if (s.error) problems.push(s.error);
+  if (!ok.length) return problems;
+
+  if (want.notStatus != null) {
+    const violations = ok.filter((s) => s.status === want.notStatus).length;
+    if (violations) {
+      problems.push(`ended as ${want.notStatus} in ${violations}/${ok.length} samples; must never`);
+    }
+  }
+  if (want.releases === true && !ok.some((s) => s.released)) {
+    problems.push(`expected release, got none in ${ok.length} samples`);
+  }
+  if (want.releases === false) {
+    const releases = ok.filter((s) => s.released).length;
+    if (releases) problems.push(`expected no release, got ${releases}/${ok.length}`);
+  }
+  if (want.status != null && !ok.some((s) => s.status === want.status)) {
+    problems.push(`expected status ${want.status}, got none in ${ok.length} samples`);
+  }
+  return problems;
+}
+
 function main() {
   const flags = parseArgs(process.argv.slice(2));
+
+  // Fail loudly rather than silently running the scripted tier under a name the user
+  // thought meant something else.
+  if (flags.worker && flags.worker !== 'claude') {
+    console.log(`\n  eval/loop: unknown worker "${flags.worker}". The only model tier is "claude".\n`);
+    process.exitCode = 1;
+    return;
+  }
 
   let dirs;
   try {
@@ -378,11 +594,19 @@ function main() {
   for (const dir of dirs.sort()) {
     const fixture = loadFixture(dir);
     if (!fixture) continue;
-    try {
-      results.push(runFixture(fixture, flags));
-    } catch (err) {
-      results.push({ name: dir, error: String(err.message || err), expected: fixture.expected });
+    // A fixture that did not opt into the model worker is deterministic, so sampling
+    // it N times would spend N× the wall clock to produce N identical rows.
+    const useModel = modelDriven(fixture, flags);
+    const runs = useModel ? flags.samples : 1;
+    const samples = [];
+    for (let i = 0; i < runs; i += 1) {
+      try {
+        samples.push(runFixture(fixture, flags));
+      } catch (err) {
+        samples.push({ name: dir, error: String(err.message || err), expected: fixture.expected });
+      }
     }
+    results.push(aggregate(samples, useModel ? 'claude' : 'script'));
   }
 
   if (flags.json) {
@@ -390,22 +614,52 @@ function main() {
     return;
   }
 
-  const graded = results.map((r) => ({ ...r, problems: r.error ? [r.error] : grade(r) }));
+  // Scripted rows are deterministic and graded strictly; model rows are graded as a
+  // distribution. Splitting on the worker rather than the sample count is what keeps a
+  // one-sample model run from being held to a scripted worker's round number.
+  const graded = results.map((r) => ({
+    ...r,
+    problems: r.worker === 'claude' ? gradeSamples(r) : r.error ? [r.error] : grade(r),
+  }));
   const correct = graded.filter((r) => !r.problems.length);
 
   console.log('');
   if (flags.ablate) console.log(`  ablating   ${flags.ablate}`);
+  if (flags.worker) console.log(`  worker     ${flags.worker} · ${flags.workerModel} · ${flags.samples} sample(s)`);
   console.log(`  fixtures   ${graded.length}`);
   console.log(`  correct    ${correct.length}/${graded.length}`);
   console.log('');
   for (const r of graded) {
     const verdict = r.problems.length ? 'FAIL' : 'ok  ';
-    const detail = r.error
-      ? r.error.slice(0, 60)
-      : `${r.released ? 'released' : 'held'} after ${r.rounds} round(s) · ended by ${r.endedBy}` +
+    let detail;
+    if (r.sampleCount > 1) {
+      const ended = Object.entries(r.endedByCounts)
+        .map(([k, v]) => `${k} ${v}`)
+        .join(' · ');
+      // Rates, with the denominator inline: a bare percentage from five samples
+      // reads like a measurement and is not one.
+      detail =
+        `${r.releaseRate == null ? '—' : `${Math.round(r.releaseRate * 100)}% released`}` +
+        ` of ${r.sampleCount}` +
+        `${r.roundsMean == null ? '' : ` · mean ${r.roundsMean.toFixed(1)} rounds`}` +
+        `${ended ? ` · ${ended}` : ''}` +
+        `${r.errored ? ` · ${r.errored} errored` : ''}`;
+    } else if (r.error) {
+      detail = r.error.slice(0, 60);
+    } else {
+      detail =
+        `${r.released ? 'released' : 'held'} after ${r.rounds} round(s) · ended by ${r.endedBy}` +
         `${r.refunded ? ` · ${r.refunded} refunded` : ''}`;
+    }
     console.log(`  ${verdict} ${r.name.padEnd(18)} ${detail}`);
     for (const problem of r.problems) console.log(`       ${problem}`);
+  }
+
+  // Asking for the model tier and getting the scripted one is the silent failure this
+  // whole opt-in-twice design risks, so it is named rather than left to be noticed.
+  if (flags.worker === 'claude' && !graded.some((r) => r.worker === 'claude')) {
+    console.log('');
+    console.log('  note       no selected fixture declares "worker": true — every row above is scripted');
   }
 
   // The row this harness exists for: which mechanisms never end a loop.
@@ -415,7 +669,11 @@ function main() {
   // suite and says nothing about the mechanism, and conflating the two would let a
   // coverage hole read as a deletion candidate.
   const counts = {};
-  for (const r of graded) if (r.endedBy) counts[r.endedBy] = (counts[r.endedBy] || 0) + 1;
+  for (const r of graded) {
+    // Every sample votes, not just the first one, or a mechanism that ended four of
+    // five sampled loops would show up here as having ended one.
+    for (const s of r.samples || [r]) if (s.endedBy) counts[s.endedBy] = (counts[s.endedBy] || 0) + 1;
+  }
   const all = ['check', 'complete', 'stall', 'plateau', 'blocker', 'seal', 'violation', 'budget', 'rounds-exhausted'];
   const covered = new Set(graded.flatMap((r) => (r.expected && r.expected.covers) || []));
 
