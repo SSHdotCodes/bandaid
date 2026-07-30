@@ -3,6 +3,8 @@
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+const { classifyTrailingQuestion } = require('./autonomy');
+const { timeUsedMs } = require('./duration');
 const project = require('./project');
 const { looksLikeCorrection } = require('./restore');
 const store = require('./store');
@@ -58,6 +60,36 @@ const DEFAULT_CONTINUATIONS = { verified: 8, judged: 4, unverified: 2 };
  * was unwinnable at the moment it started.
  */
 const DEFAULT_BLOCKER_LIMIT = 2;
+
+/**
+ * How many continuation timestamps to keep.
+ *
+ * Enough to average a round's duration over a goal that has been running a
+ * while, and few enough that goal.json does not grow across a three-day
+ * objective. Eight is the largest continuation tier, so a fully verified goal
+ * keeps its whole history.
+ */
+const CONTINUATION_TRAIL = 8;
+
+/**
+ * The hard ceiling on an earned leash, as a multiple of the tier value.
+ *
+ * A refunded round costs nothing, so a goal that keeps producing a progress signal
+ * would otherwise run without bound — which is precisely Codex's failure at the
+ * other end, an unbounded loop by default. Three means a verified goal that keeps
+ * moving gets up to 24 rounds instead of 8, and one that stops moving still dies
+ * faster than it does today, because a stall costs double.
+ */
+const CEILING_MULTIPLIER = 3;
+
+/**
+ * Append this continuation's timestamp, keeping only the trailing window.
+ */
+function recordContinuation(goal, now = Date.now()) {
+  const trail = Array.isArray(goal.continuationAt) ? goal.continuationAt : [];
+  const next = [...trail, new Date(now).toISOString()];
+  return { ...goal, continuationAt: next.slice(-CONTINUATION_TRAIL) };
+}
 
 /** What is actually watching this goal, strongest first. */
 function verifierStrength(config, goal) {
@@ -197,6 +229,7 @@ function newGoal(
     source = 'auto',
     maxContinuations = 2,
     tokenBudget = null,
+    timeBudgetMs = null,
     turnIndex = 0,
     check = null,
     criteria = [],
@@ -228,10 +261,38 @@ function newGoal(
     source,
     createdAt: now,
     updatedAt: now,
+    // When this goal's *budget* started running, as opposed to when the
+    // objective was first set. They differ after an adoption: adoptHandoff
+    // deliberately grants a new day a fresh continuation allowance, and a
+    // wall-clock budget has to follow the allowance rather than the birthday.
+    // createdAt remains the objective's age, and is what `goal history` shows.
+    startedAt: now,
+    // Last turn that moved the work. Deliberately coarse for now — it advances
+    // on any non-trivial turn, so a turn that edited a file while achieving
+    // nothing counts. A progress signal worth the name needs the evidence
+    // ledger, and replacing this is its own piece of work.
+    lastProgressAt: null,
+    // When each continuation was spent. Capped at the last CONTINUATION_TRAIL,
+    // and kept so "how long is a round taking" is answerable without re-reading
+    // turns.jsonl on every stop.
+    continuationAt: [],
     continuations: 0,
     maxContinuations,
+    // A round that moved the work is refunded; a round that moved nothing twice
+    // running costs double. `refunded` is the count for the record, `stalls` the
+    // consecutive-nothing counter, and `lastProgressSignal` names which rule fired
+    // so a wrong refund is visible in this file rather than having to be inferred.
+    // See src/lib/progress.js.
+    refunded: 0,
+    stalls: 0,
+    lastProgressSignal: null,
+    taskRefunds: 0,
+    // Snapshots the progress signal compares against, carried turn to turn.
+    coveredCount: null,
+    completedTasks: null,
     tokenBudget,
     tokensUsed: 0,
+    timeBudgetMs,
     turnIndex,
     // Shell command that proves this objective is done, or null to fall back to
     // the configured default. Exit 0 is the only thing that closes a goal
@@ -507,8 +568,16 @@ function endsWithQuestionToUser(message) {
  * Decide whether the Stop hook should block. Returns
  * `{ action: 'allow' | 'continue' | 'wrap-up', goal, reason }`.
  */
-function decideOnStop({ goal, config, stopHookActive, recentBatches, lastAssistantMessage = '' }) {
+function decideOnStop({
+  goal,
+  config,
+  stopHookActive,
+  recentBatches,
+  lastAssistantMessage = '',
+  now = Date.now(),
+}) {
   const goals = config.goals || {};
+  let askedPermission = false;
 
   if (!config.enabled || goals.enabled === false || goals.mode === 'off') {
     return { action: 'allow', goal, reason: 'goals disabled' };
@@ -527,22 +596,66 @@ function decideOnStop({ goal, config, stopHookActive, recentBatches, lastAssista
     return { action: 'wrap-up', goal, reason: `continuation budget exhausted (${goal.continuations}/${max})` };
   }
 
+  // The hard stop on an earned leash. A refunded round costs nothing, so without
+  // this a goal that kept producing a progress signal would run forever — which is
+  // Codex's failure at the other end, an unbounded loop by default. Total rounds,
+  // spent plus refunded, may not exceed CEILING_MULTIPLIER times the tier.
+  const totalRounds = (goal.continuations || 0) + (goal.refunded || 0);
+  if (totalRounds >= max * CEILING_MULTIPLIER) {
+    return {
+      action: 'wrap-up',
+      goal,
+      reason: `round ceiling reached (${totalRounds} of ${max * CEILING_MULTIPLIER})`,
+    };
+  }
+
   if (goal.tokenBudget != null && goal.tokensUsed >= goal.tokenBudget) {
     return { action: 'wrap-up', goal, reason: 'token budget exhausted' };
   }
 
+  // The third budget best-goal-report.md specified and nothing enforced. It
+  // routes to the same wrap-up the other two use, so there is no new terminal
+  // state and no new prompt to keep in step.
+  const timeBudget = goal.timeBudgetMs ?? (goals.timeBudgetMs ?? null);
+  if (timeBudget != null) {
+    const used = timeUsedMs(goal, now);
+    if (used != null && used >= timeBudget) {
+      return { action: 'wrap-up', goal, reason: 'time budget exhausted' };
+    }
+  }
+
   if (endsWithQuestionToUser(lastAssistantMessage)) {
-    return { action: 'allow', goal, reason: 'model is asking the user a question' };
+    // With autonomy off this is where it has always ended: any trailing '?' wins.
+    // With it on, a request for permission to do work already in scope does not,
+    // while a genuine question — and anything the classifier is unsure of — still
+    // does. See src/lib/autonomy.js for why the uncertainty goes that way.
+    if (!goals.autonomy) {
+      return { action: 'allow', goal, reason: 'model is asking the user a question' };
+    }
+    const verdict = classifyTrailingQuestion(lastAssistantMessage, { blockers: goal.blockers || [] });
+    if (verdict.kind !== 'permission') {
+      return { action: 'allow', goal, reason: `model is asking the user a question (${verdict.kind})` };
+    }
+    // Blocked, and the caller needs to know why: the continuation says "decide it
+    // yourself" only on this path, so it costs nothing on any other.
+    askedPermission = true;
   }
 
   if (goals.skipTrivialTurns !== false && turnWasTrivial(recentBatches)) {
     return { action: 'allow', goal, reason: 'turn changed nothing' };
   }
 
-  return { action: 'continue', goal, reason: `continuation ${goal.continuations + 1}/${max}` };
+  return {
+    action: 'continue',
+    goal,
+    reason: `continuation ${goal.continuations + 1}/${max}`,
+    askedPermission,
+  };
 }
 
 module.exports = {
+  CEILING_MULTIPLIER,
+  CONTINUATION_TRAIL,
   DEFAULT_BLOCKER_LIMIT,
   DEFAULT_CONTINUATIONS,
   MUTATING_TOOLS,
@@ -567,11 +680,13 @@ module.exports = {
   normalizeCriteria,
   normalizeReason,
   plateauReached,
+  recordContinuation,
   recordReason,
   resolveMaxContinuations,
   saveGoal,
   setCriteria,
   setGoal,
+  timeUsedMs,
   turnWasTrivial,
   verifierStrength,
 };
