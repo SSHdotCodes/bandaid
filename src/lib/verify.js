@@ -79,6 +79,20 @@ function runCheck(command, { cwd, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   return { ok: result.status === 0, status: result.status, output };
 }
 
+/**
+ * The held-out tier. Same contract and the same fail-closed policy as `runCheck`,
+ * which it delegates to — a seal that times out or cannot be spawned has proven
+ * nothing, and silence is not evidence here either.
+ *
+ * It is a separate export rather than a second `runCheck` call site because the
+ * two differ in everything except how they are run: `check` is a signal the worker
+ * is *meant* to read, and `seal` is one it must never read. Keeping the names
+ * apart is what makes a leak visible in a diff.
+ */
+function runSeal(command, { cwd, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  return runCheck(command, { cwd, timeoutMs });
+}
+
 /** The turn record Bandaid already keeps, rendered as an evidence log. */
 function evidenceFromTurns(turns, { maxTokens = EVIDENCE_MAX_TOKENS } = {}) {
   const grouped = groupBatchesByTurn(turns || [], []);
@@ -202,6 +216,87 @@ function runJudge({ objective, evidence = '', checkOutput = null, criteria = [],
   return parseVerdict(result.stdout);
 }
 
+const CRITERION_RE = /^[^\S\n]*(?:[-*]|\d+[.)])[^\S\n]*(.+)$/gm;
+
+/**
+ * The rubric, written by something that is not going to be graded on it.
+ *
+ * Until this existed, `/bandaid:goal` had the worker derive its own acceptance
+ * criteria, then work toward them, then be graded against them by a judge reading
+ * the same list. Sharing the list fixed the drift karpathy-report.md named — worker
+ * and judge on one rubric instead of two — but left the prior question open: the
+ * author and the examinee were still the same model in the same conversation.
+ *
+ * A contract authored by the party it binds is not a contract. The literature is
+ * blunt about it (arXiv 2605.25665: contracts must "originate from domain experts
+ * or verified requirements systems, never from the agent itself"), and the failure
+ * it predicts is the quiet one — criteria that are individually reasonable and
+ * collectively smaller than the objective.
+ *
+ * So this runs the same way the judge does: separate process, read-only, no
+ * conversation. It gets the objective as written and the repository, and nothing
+ * about how the work is going or what the worker intends to do about it.
+ *
+ * Returns an array of criteria, or null for "no opinion" — a missing CLI, a crash,
+ * a timeout, or output that does not follow the contract. Null is not a failure
+ * state; it is the signal to fall back to the worker and say so.
+ */
+function criteriaPrompt(objective) {
+  return `You are writing the acceptance criteria for an objective somebody else is about to implement. You will not do the work and you will not be graded on it.
+
+<objective>
+${objective}
+</objective>
+
+Read the repository to ground the criteria in what is actually there — real paths, real symbols, real commands. Do not propose criteria for work the objective does not ask for.
+
+Write 2 to 5 criteria. Each one states a condition that will be observably true when the objective is met: a command that exits 0, a file that exists and contains something specific, a behaviour that can be checked by looking. Together they must cover the objective as written — including any part of it that is awkward, slow, or hard to test.
+
+The failure to avoid is a list that is individually reasonable and collectively smaller than the objective. Whoever implements this will treat your list as the whole bar, so anything you leave out is work that will not happen.
+
+Reply with the criteria as a numbered list and nothing else. No preamble, no commentary.`;
+}
+
+function parseCriteria(stdout) {
+  const out = [];
+  const text = String(stdout || '');
+  for (const match of text.matchAll(CRITERION_RE)) {
+    const line = match[1].trim();
+    if (line) out.push(line);
+  }
+  return out.length ? out.slice(0, 5) : null;
+}
+
+function runCriteria({ objective, cwd, model = 'haiku', timeoutMs = DEFAULT_TIMEOUT_MS, cli = 'claude' } = {}) {
+  if (!objective) return null;
+
+  const result = spawnSync(
+    cli,
+    [
+      '-p',
+      criteriaPrompt(objective),
+      '--model',
+      model,
+      '--allowedTools',
+      'Read Grep Glob',
+      '--disallowedTools',
+      'Edit Write NotebookEdit Bash Task Agent',
+    ],
+    {
+      cwd: cwd || process.cwd(),
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      maxBuffer: 4 * 1024 * 1024,
+      // Same recursion guard the judge takes, and for the same reason: this is
+      // itself a Claude Code session and would otherwise fire the Stop hook.
+      env: { ...process.env, BANDAID_ENABLED: '0' },
+    },
+  );
+
+  if (result.error || result.status !== 0) return null;
+  return parseCriteria(result.stdout);
+}
+
 /**
  * Run the tiers that are configured and report whether the goal is proven done.
  *
@@ -227,7 +322,15 @@ function ledgerFor(goal, cwd) {
   try {
     stamp = worktreeStamp(goal.projectRoot);
     const entries = evidence.read(goal.projectRoot, { objectiveHash: evidence.objectiveHash(goal.objective) });
-    text = evidence.render(entries, { currentStamp: stamp });
+    // Seal records are written to the ledger for the user and for coverage, and
+    // withheld from here. This text is the judge's, and the judge's reason becomes
+    // the next continuation's steering — so a seal finding reaching the ledger's
+    // rendered form would reach the worker one hop later, on the round after an
+    // adopted or unblocked goal resumes. The one hop is the whole leak.
+    text = evidence.render(
+      entries.filter((entry) => entry && entry.kind !== 'seal'),
+      { currentStamp: stamp },
+    );
   } catch {
     /* a ledger that cannot be read is simply absent */
   }
@@ -265,6 +368,50 @@ function assess({ goal, config, cwd, turns = [], spawn = {}, record = false } = 
     return line ? line.slice(0, 120) : '';
   };
   const check = (spawn.runCheck || runCheck)(command, { cwd, timeoutMs });
+
+  /**
+   * The held-out tier, run only on a round that is otherwise about to close the
+   * goal. Returns a refusal, or null when the seal passed or is not configured.
+   *
+   * Two properties do the work, and both are about what does *not* happen:
+   *
+   * - It does not run on a failing round. A seal the worker could trigger every
+   *   round is a per-round oracle, and an oracle is a gradient. This one only
+   *   speaks at the moment of closing, so there is nothing to climb.
+   * - Nothing it learns reaches the model. Not the command, not the output, not a
+   *   reason derived from either. `reason` below is a constant.
+   *
+   * The failure is terminal rather than another continuation, because continuing
+   * would mean saying why. An opaque constant reason would also trip the plateau
+   * breaker two rounds later — the inverse of the bug at `runCheck`'s call site
+   * above, where a constant reason killed converging loops. Blocking now reaches
+   * the same place, sooner, and with a human in it.
+   */
+  const sealCommand = goal && goal.seal != null ? goal.seal : settings.seal;
+  const sealRefusal = () => {
+    const seal = (spawn.runSeal || runSeal)(sealCommand, { cwd, timeoutMs });
+    if (!seal || seal.ok) return null;
+    ledger.record({
+      kind: 'seal',
+      claim: 'the held-out check did not pass',
+      pointers: [`cmd:${sealCommand}`],
+      verdict: 'refuted',
+      detail: seal.output,
+    });
+    return {
+      proven: false,
+      sealed: true,
+      reason: 'held-out verification did not pass',
+      // `output: null` on purpose: this object is what `continuationPrompt`
+      // renders from, so it must carry nothing even if a future path passes a
+      // sealed assessment to it by mistake.
+      verification: { source: 'seal', ok: false, output: null },
+      // For the goal record and `bandaid goal show` — the user's copy, never the
+      // model's. stop.js is the only reader.
+      sealOutput: seal.output,
+      sealCommand,
+    };
+  };
 
   // Ground truth outranks every opinion, including the judge's. If the command
   // says no, there is nothing left to deliberate.
@@ -395,6 +542,12 @@ function assess({ goal, config, cwd, turns = [], spawn = {}, record = false } = 
         verdict: proven ? 'supported' : 'refuted',
         detail: verdict.verdict,
       });
+      // The judge is about to close the goal. Last word goes to the tier it
+      // cannot see and the worker was never steered by.
+      if (proven) {
+        const refused = sealRefusal();
+        if (refused) return refused;
+      }
       return {
         proven,
         // A violation is not a smaller kind of "continue". Nothing the next turn
@@ -407,6 +560,8 @@ function assess({ goal, config, cwd, turns = [], spawn = {}, record = false } = 
   }
 
   if (check && check.ok) {
+    const refused = sealRefusal();
+    if (refused) return { ...refused, probes: probeResult };
     return {
       proven: true,
       reason: `check passed: ${command}`,
@@ -421,10 +576,14 @@ function assess({ goal, config, cwd, turns = [], spawn = {}, record = false } = 
 module.exports = {
   DEFAULT_TIMEOUT_MS,
   assess,
+  criteriaPrompt,
   evidenceFromTurns,
   judgePrompt,
+  parseCriteria,
   parseVerdict,
   runCheck,
+  runCriteria,
   runJudge,
+  runSeal,
   tail,
 };

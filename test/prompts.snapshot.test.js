@@ -8,7 +8,7 @@ const { describe, it } = require('node:test');
 const { DEFAULTS } = require('../src/lib/config');
 const { newGoal } = require('../src/lib/goals');
 const { buildRestoreBlock } = require('../src/lib/restore');
-const { judgePrompt } = require('../src/lib/verify');
+const { criteriaPrompt, judgePrompt } = require('../src/lib/verify');
 const {
   COMPACTION_FIDELITY_ADDENDUM,
   SUMMARIZATION_PROMPT,
@@ -16,6 +16,7 @@ const {
   continuationPrompt,
   openObjectivePrompt,
   probePendingPrompt,
+  sealPrompt,
   violationPrompt,
 } = require('../src/lib/prompts');
 
@@ -247,6 +248,20 @@ describe('prompt snapshots', () => {
     );
   });
 
+  // The golden that matters for what it does not contain. `sealPrompt` is the one
+  // place a held-out finding could reach the model, so this snapshot is also the
+  // leak test: the assertions below pin that neither the command nor the output
+  // is reachable from here, because neither is an argument.
+  it('seal — a held-out check refused the close', () => {
+    const rendered = sealPrompt(withCriteria, { showCommand: 'node /bandaid.js goal show --session S' });
+    assert.doesNotMatch(rendered, /held-out cases|CANARY|exit 1/, 'the finding is the user\'s, not the model\'s');
+    matchesSnapshot('seal', rendered);
+  });
+
+  it('seal — with nowhere to point the user', () => {
+    matchesSnapshot('seal-bare', sealPrompt(withCriteria, {}));
+  });
+
   it('judge — constraints and blockers change what it is asked to do', () => {
     matchesSnapshot(
       'judge-constraints',
@@ -262,6 +277,14 @@ describe('prompt snapshots', () => {
 
   it('budget limit', () => {
     matchesSnapshot('budget-limit', budgetLimitPrompt({ ...withCriteria, continuations: 8, tokenBudget: 50000, tokensUsed: 51200 }, opts));
+  });
+
+  // Not injected into the session — this one is spent in a separate process, once,
+  // before any work happens. It gets a ceiling anyway: it is prose that reaches a
+  // model on Bandaid's behalf, and the rule does not have an exemption for prose
+  // that is spent somewhere cheaper.
+  it('criteria — the rubric, written by something that will not be graded on it', () => {
+    matchesSnapshot('criteria-derive', criteriaPrompt('Port the retry logic to the new client'));
   });
 
   it('judge — with and without a shared rubric', () => {
@@ -342,6 +365,9 @@ const CEILINGS = {
   'continuation-judge-finding': 852,
   'continuation-probe-failed': 851,
   'continuation-scope-failed': 841,
+  // Spent once per goal in a subprocess, not on any continuation, so its cost is
+  // paid before the loop starts and never again.
+  'criteria-derive': 192,
   'judge-bare': 190,
   'judge-constraints': 412,
   'judge-criteria': 238,
@@ -350,6 +376,12 @@ const CEILINGS = {
   'open-objective-offer': 257,
   'probe-pending': 91,
   'restore-block': 297,
+  // Terminal, like `violation`: fires at most once per goal and never on the
+  // continuation path, so its cost on an ordinary round is zero. Kept short for a
+  // second reason — every sentence here is a sentence about a finding the model is
+  // not being given, and there is not much to say about that honestly.
+  seal: 137,
+  'seal-bare': 119,
   violation: 196,
 };
 

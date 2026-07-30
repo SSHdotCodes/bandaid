@@ -1,7 +1,12 @@
 # Plans: a clock, an ETA, and a longer leash
 
-Ten briefs. Each is roughly 100k tokens of implementation work, individually
-scoped, individually measured, and individually deletable.
+Ten briefs, plus two that came later from a different input. Each is roughly 100k
+tokens of implementation work, individually scoped, individually measured, and
+individually deletable.
+
+Briefs 11 and 12 are appended at the bottom. They do not belong to the objective
+below — they come from `harness-report.md`, which read users rather than
+implementations, and they are here because they are written under the same rules.
 
 The objective they serve: Bandaid can keep a turn from ending, but it cannot tell
 the model what time it is, cannot say how long the remaining work will take, and
@@ -138,6 +143,63 @@ Three bugs found by measurement rather than by reading:
 **Brief 3's finding reshapes brief 4.** A task list exists for **1 of 15** local
 sessions. Task-count ETA is therefore the exception, not the rule, and brief 4's
 `continuationAt[]` path is the main one.
+
+---
+
+## Two more, from reading users instead of implementations
+
+`best-goal-report.md` read Codex and Claude Code from source and docs.
+`karpathy-report.md` read a method. `harness-report.md` read bug trackers, field
+guides, and the 2026 measurement literature across four harnesses — and found that
+most of what people complain about was already answered here. Two things were not,
+and both landed on the tiers this repository trusts most rather than the ones it
+hedges.
+
+Two findings from that survey did not become briefs, and are recorded because they
+change how the existing work should be read:
+
+- **Codex [#19910](https://github.com/openai/codex/issues/19910) is a user asking
+  OpenAI for something this plugin already does.** Codex re-injects the objective
+  after compaction but not the completion audit, so the agent wakes up knowing the
+  goal and not the bar, and closes it. `src/lib/restore.js:205-222` carries the
+  objective *and* the fixed criteria across the reset, and the audit is regenerated
+  from `goal.json` every continuation rather than living in history at all. This is
+  the clearest external evidence that the compaction half and the goals half belong
+  in one plugin.
+- **Pi has no goal system on purpose**, and its author reports not missing
+  compaction either. That is the control case for everything here: these mechanisms
+  are a bet that nobody is watching the turn. Worth keeping visible, because it is
+  the assumption every brief inherits without restating.
+
+| # | Brief | Adds | Decided by |
+|---|---|---|---|
+| 11 | [The seal](11-seal.md) | `goals.seal`; a held-out check the worker never sees | `npm run loop -- --ablate seal` — the fixture closes `complete` without it |
+| 12 | [Criteria independence](12-criteria-independence.md) | `runCriteria`; an acceptance gate | `npm run criteria` — coverage of hand-written ground truth |
+
+| # | State |
+|---|---|
+| 11 | **shipped, and its ablation is not null.** A new loop fixture in SpecBench's feature-isolation shape closes as `complete` at round 1 with the seal withheld, and blocks at round 2 with it. 8/8 → 7/8 ablated, other fixtures unmoved. Three leak paths closed and tested, including the ledger→judge→reason hop nobody would have found by reading. Costs one terminal golden and zero words on any continuation |
+| 12 | **shipped, and the number it produced is half-trustworthy on purpose.** Independent derivation covers 89% of ground truth against a worker baseline's 33%, stable over 9 samples — but the baseline is three lists the fixture author wrote knowing the score. The independent arm is measured; the *margin* is not, and the brief says so rather than quoting 56 points |
+
+### What these two did not change
+
+**Every one of the ten continuation goldens is unmoved.** Both mechanisms default to
+off and are byte-identical for a user who turns neither on — the property brief 10
+established and the one most worth not spending. The seal's prompt is terminal and
+the criteria prompt is a subprocess, so neither is paid on an ordinary round.
+
+### Still open, added by these two
+
+- **An unsatisfiable goal is bounded but never diagnosed.** Claude Code #58348's ask
+  — notice that a condition references something that does not exist and say so once
+  — is not built. The round ceiling caps the damage and the plateau breaker catches
+  the repeating case, but a model that rephrases its complaint each round defeats the
+  comparison, and neither mechanism explains what happened.
+- **The worker baseline in `npm run criteria` is authored, not observed.** The
+  fixture that would settle brief 12's margin needs criteria captured from real
+  mid-conversation goal-setting. Same shape as brief 9's scripted worker.
+- **The seal is not shown, not unknowable.** `goal.json` is on disk and the worker
+  has a shell. It answers drift, not curiosity.
 
 ### Brief 1, as built vs as written
 

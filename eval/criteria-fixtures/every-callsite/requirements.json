@@ -1,0 +1,5 @@
+[
+  {"id": "migrated", "why": "callers move to the replacement", "match": ["parse\\b", "parseNext", "replacement", "migrat"]},
+  {"id": "exhaustive", "why": "every call site, not some", "match": ["every", "all call", "no (remaining|call)", "zero", "grep", "no file"]},
+  {"id": "deleted", "why": "the helper itself is gone", "match": ["delet", "remov", "no longer (exists|defined)", "gone"]}
+]

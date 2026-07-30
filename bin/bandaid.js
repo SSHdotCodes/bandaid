@@ -105,11 +105,15 @@ Usage: bandaid <command> [options]
   goal show                  Print the active objective
   goal set <objective>       Set the objective explicitly
       --check "<command>"    Close the goal automatically when this exits 0
+      --seal "<command>"     A held-out check, run only when the goal is about to
+                             close. Neither it nor its output is shown to the model
       --budget <tokens>      Stop continuing after roughly this many tokens
       --time-budget <dur>    Wrap up after this much wall-clock (90m, 2h, 1h30m)
       --probe <id>           Arm a specific probe (repeatable; default is the manifest)
       --scope <glob>         Declare a path this goal may touch (repeatable)
   goal criteria [<c> ...]    Record the fixed acceptance criteria, or list them
+      --derive               Have a separate reader write them instead, from the
+                             objective and the repo. Falls back to <c> if it cannot
       --replace              Overwrite criteria that were already fixed
   goal block <reason>        Record something this environment cannot do, and keep going
   goal complete [note]       Mark the objective achieved (this is what the model calls)
@@ -359,6 +363,8 @@ function cmdGoal(positional, flags) {
       }
       const effectiveCheck = goal.check ?? config.loadConfig().goals.check;
       out(`check:         ${effectiveCheck || 'none'}`);
+      const effectiveSeal = goal.seal ?? config.loadConfig().goals.seal;
+      if (effectiveSeal) out(`seal:          ${effectiveSeal}  (held out — never shown to the model)`);
       const criteria = goal.criteria || [];
       out(`criteria:      ${criteria.length ? `${criteria.length} (${goal.criteriaSource || 'unknown'})` : 'none recorded'}`);
       for (const [i, text] of criteria.entries()) out(`  ${i + 1}. ${text}`);
@@ -375,6 +381,16 @@ function cmdGoal(positional, flags) {
       }
       if (goal.lastReason) out(`last verdict:  ${goal.lastReason}${goal.plateau ? ` (repeated ${goal.plateau}x)` : ''}`);
       if (goal.note) out(`note:          ${goal.note}`);
+      // The one place the seal's finding is rendered. This is the reader it was
+      // withheld from the model for.
+      if (goal.sealFailure) {
+        out('');
+        out(`held-out check refused the close at ${goal.sealFailure.at}`);
+        if (goal.sealFailure.command) out(`  command: ${goal.sealFailure.command}`);
+        if (goal.sealFailure.output) {
+          for (const line of String(goal.sealFailure.output).split('\n')) out(`  ${line}`);
+        }
+      }
       out('');
       out(goal.objective);
       return;
@@ -387,6 +403,7 @@ function cmdGoal(positional, flags) {
       }
       const cfg = config.loadConfig();
       const check = typeof flags.check === 'string' ? flags.check : null;
+      const seal = typeof flags.seal === 'string' ? flags.seal : null;
       const cwd = flags.cwd || process.cwd();
 
       // Rejected rather than guessed: a budget parsed wrongly caps the work at a
@@ -416,6 +433,11 @@ function cmdGoal(positional, flags) {
         source: 'explicit',
         // Resolved with the check in hand, so `--check` earns the longer leash
         // in the same breath that it supplies the thing doing the verifying.
+        //
+        // `seal` deliberately does not enter this. It vetoes but never proves —
+        // the same reason probes do not earn a longer leash — and it is only
+        // reachable on a round something else was already closing, so a goal
+        // carrying a seal and nothing else would run it never.
         maxContinuations: flags['max-continuations']
           ? Number(flags['max-continuations'])
           : goals.resolveMaxContinuations(cfg, { check }),
@@ -427,11 +449,18 @@ function cmdGoal(positional, flags) {
         // predates the objective.
         turnIndex: ledger.currentTurnIndex(sessionId),
         check,
+        seal,
         cwd,
       });
       out(`Goal set for session ${sessionId}.`);
       if (typeof flags.check === 'string') {
         out(`It closes automatically when \`${flags.check}\` exits 0.`);
+      }
+      if (seal) {
+        out(`A held-out check runs before it closes. Bandaid will not show it, or its output, to the model.`);
+        if (!check && !cfg.goals.check && !cfg.goals.judge) {
+          out(`Note: nothing else can prove this goal, so the held-out check will never run. Add --check or turn the judge on.`);
+        }
       }
       if (timeBudgetMs != null) {
         out(`It wraps up after ${formatBudget(timeBudgetMs)} of wall-clock.`);
@@ -444,22 +473,55 @@ function cmdGoal(positional, flags) {
         fail('no active goal to attach criteria to');
         return;
       }
-      if (!rest.length) {
+      if (!rest.length && !flags.derive) {
         const existing = goal.criteria || [];
         if (!existing.length) out('No criteria recorded.');
         for (const [i, text] of existing.entries()) out(`${i + 1}. ${text}`);
         return;
       }
+
+      // Derived by a process that will not be graded on the result. Falls back to
+      // the caller's own list rather than failing: a goal with worker-written
+      // criteria is the behaviour that shipped for months, and it is better than a
+      // goal with none. What must not happen silently is the provenance going
+      // unrecorded, which is why `criteriaSource` distinguishes the two.
+      let proposed = rest;
+      let source = 'model';
+      if (flags.derive) {
+        const cfg = config.loadConfig();
+        const derived = require('../src/lib/verify').runCriteria({
+          objective: goal.objective,
+          cwd: goal.projectRoot || flags.cwd || process.cwd(),
+          model: cfg.goals.judgeModel || 'haiku',
+          cli: cfg.goals.judgeCli || 'claude',
+          timeoutMs: cfg.goals.verifyTimeoutMs,
+        });
+        if (derived && derived.length) {
+          proposed = derived;
+          source = 'independent';
+        } else if (rest.length) {
+          out('Could not derive criteria independently; falling back to the list you supplied.');
+        } else {
+          fail('could not derive criteria independently, and no fallback list was given');
+          return;
+        }
+      }
+
       const before = (goal.criteria || []).length;
-      const updated = goals.setCriteria(sessionId, rest, {
-        source: 'model',
+      const updated = goals.setCriteria(sessionId, proposed, {
+        source,
         replace: flags.replace === true || flags.replace === 'true',
       });
       if (before && !flags.replace) {
         out(`Criteria already fixed for this goal (${before}); pass --replace to overwrite them.`);
         return;
       }
-      out(`Recorded ${updated.criteria.length} acceptance criteria. They are now the bar every turn.`);
+      out(`Recorded ${updated.criteria.length} acceptance criteria (${updated.criteriaSource}). They are now the bar every turn.`);
+      for (const [i, text] of updated.criteria.entries()) out(`  ${i + 1}. ${text}`);
+      if (updated.criteriaSource === 'independent') {
+        out('');
+        out('Written by a separate reader that will not be graded on them. Show them to the user before starting work — if they name the wrong bar, this is the moment to fix it.');
+      }
       return;
     }
     case 'complete':

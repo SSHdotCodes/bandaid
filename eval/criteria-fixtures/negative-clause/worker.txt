@@ -1,0 +1,3 @@
+the export endpoint responds in under 500ms for 10k rows
+a benchmark script records the before and after timing
+npm test exits 0

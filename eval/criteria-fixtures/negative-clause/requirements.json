@@ -1,0 +1,5 @@
+[
+  {"id": "faster", "why": "the positive half", "match": ["fast", "speed", "latenc", "ms\\b", "duration", "quicker", "time"]},
+  {"id": "column-order", "why": "first guardrail", "match": ["column", "order", "header"]},
+  {"id": "no-deps", "why": "second guardrail", "match": ["depend", "package.json", "node_modules", "no new (lib|module|packag)"]}
+]

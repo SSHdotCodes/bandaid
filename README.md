@@ -297,7 +297,7 @@ records the objective and then, in the same turn, 2–5 checkable criteria:
 
 ```
 $ bandaid goal show
-criteria:      3 (model)
+criteria:      3 (independent)
   1. src/client.js retries a failing call with exponential backoff
   2. src/client.js no longer references retryLegacy
   3. test/client.test.js asserts that successive retry delays increase
@@ -308,6 +308,26 @@ judge as its rubric, and carried through compaction alongside the objective. The
 completion audit grades them one at a time instead of re-deriving requirements.
 They cannot be quietly rewritten later — `bandaid goal criteria` refuses to move
 a bar that is already fixed unless you pass `--replace`.
+
+**Who writes them matters, and it is not the model doing the work.** Sharing one
+fixed list stops the worker and the judge from grading against two different bars,
+but for a while the list was still written by the model that would then be graded
+on it — and a contract authored by the party it binds narrows in a way nothing
+downstream can catch, because from the moment it is recorded the short list *is*
+the bar for everyone. So `goal criteria --derive` runs a separate headless reader
+over the objective and the repository, with no access to the conversation, and its
+list wins. `criteriaSource` records which happened: `independent`, `model` if the
+subprocess could not run and Bandaid fell back rather than pretending, or `user`.
+
+`/bandaid:goal` then **stops and shows you the criteria before any work starts**.
+That pause is the point: they are fixed once, and the cheapest moment to correct a
+wrong bar is before anything has been built against it.
+
+`npm run criteria` scores this. On three fixtures built as narrowing traps, an
+independent author covers **89%** of hand-written ground truth against a worker
+baseline's 33% — with the caveat, recorded in the harness and in
+[brief 12](docs/plans/12-criteria-independence.md), that the baseline is authored
+rather than observed, so the independent arm is measured and the *margin* is not.
 
 ### Across days: an objective that outlives its session
 
@@ -700,6 +720,41 @@ the argument — the judge is not even consulted. A *passing* check still gets
 judged when the judge is on, because green tests and a satisfied objective are
 not the same claim.
 
+**A seal — the check the model is never shown.** Off by default; attach one with
+`--seal`:
+
+```bash
+/bandaid:goal Make the composed query path work --check "npm test" --seal "npm run test:holdout"
+```
+
+The problem it answers is that `check` is a signal the worker can *see*. Its
+command is in the goal record and its output comes back as the reason to fix — on
+purpose, because that is what makes it useful feedback. It is also what makes it a
+target. [SpecBench](https://arxiv.org/html/2605.21384v1) measures the gap between a
+visible test suite and a held-out one at roughly **27 points per tenfold increase in
+code size, reaching 100 points on the largest tasks**, and the largest share of it is
+work whose features pass individually and do not compose. METR finds reward hacking
+in 30% of runs by default and **70–95% after the model is explicitly told not to**,
+which is roughly the end of the argument for solving this with another paragraph.
+
+So the seal runs **only on a round that is otherwise about to close the goal**, and
+nothing it produces reaches the model — not the command, not the output, not a
+reason derived from either. On failure the goal blocks rather than continuing,
+because continuing would mean saying why, and a seal the worker is steered by is
+just a slow `check`. The finding goes to you:
+
+```
+$ bandaid goal show
+held-out check refused the close at 2026-07-30T18:22:04.113Z
+  command: npm run test:holdout
+  composed filter+group ignores the predicate: group a still has 2 rows
+```
+
+It is **not shown, not secret** — `goal.json` is on disk and the model has a shell.
+It answers drift toward the visible signal, not curiosity. That the seal *exists* is
+stated to the model deliberately: a worker that knows an unseen check will run has
+nothing to aim at, which is the whole asymmetry.
+
 **A plateau breaker.** Both budgets — Codex's tokens and Bandaid's continuation
 count — measure how much has been spent, not whether anything is moving. When
 two verification runs in a row produce the byte-identical failure, the loop has
@@ -728,7 +783,7 @@ Bandaid's off and use the native one if you prefer.
 |---|---|
 | `/bandaid:status` | Config, install state, what has been captured |
 | `/bandaid:preview` | Exactly what would be restored if you compacted now |
-| `/bandaid:goal <objective> [--check "<cmd>"]` | Set an explicit objective, optionally with a command that proves it done. `--time-budget 2h` caps its wall-clock |
+| `/bandaid:goal <objective> [--check "<cmd>"] [--seal "<cmd>"]` | Set an explicit objective, optionally with a command that proves it done and a held-out one the model is never shown. `--time-budget 2h` caps its wall-clock |
 | `/bandaid:goal-status` | Show the objective, its check, and its continuation budget |
 | `/bandaid:goal-done` | Close the objective |
 | `/bandaid:verify` | Run the check and the judge now, and show the verdict |
@@ -769,6 +824,7 @@ goal running; `goal blocked` gives up on the whole objective.
     "skipTrivialTurns": true,
     "autonomy": false,              // a permission-ask still ends the turn
     "check": null,                  // shell command; exit 0 closes any goal
+    "seal": null,                   // held-out check; never shown to the model
     "judge": false,                 // independent read-only verifier
     "judgeModel": "haiku",
     "judgeCli": "claude",           // binary the judge runs as
@@ -837,6 +893,34 @@ the first compaction after install replays prompts from before Bandaid existed.
   pass, not that the objective was met; that gap is what the judge is for, and
   the judge is a model too. Neither tier turns a vague objective into a
   verifiable one.
+- **The seal is not shown to the model; it is not hidden from it.** `goal.json` is
+  on disk, the worker has a shell, and nothing stops it reading either. What the
+  seal actually buys is that the loop is never *steered* by it: the command and its
+  output are absent from every prompt, every reason, and the judge's copy of the
+  ledger, so the work cannot drift toward satisfying it the way it drifts toward
+  satisfying `check`. That is a defence against Goodhart, not against curiosity, and
+  the two are worth keeping apart. If you need the latter, the seal belongs in CI
+  where the worker has no filesystem, not in a goal record.
+- **A seal only runs if something else was already closing the goal.** It gates the
+  paths that return "proven", so a goal with a seal and no check and no judge will
+  never run it — nothing ever reaches the gate. `bandaid goal set` warns when you
+  configure that combination, but the warning is the only thing standing between it
+  and silently doing nothing.
+- **`npm run criteria` measures one arm properly and one arm not at all.** The
+  independent list is nine stochastic samples scored against ground truth written
+  beforehand. The worker baseline it is compared to is three lists the fixture
+  author wrote, knowing what would be scored — so all three landing on exactly 33%
+  is a fact about the author. The supported claim is *independent derivation reaches
+  the awkward half of an objective*; the unsupported one is *by 56 points more than
+  a real worker would*. Settling it needs criteria captured from live goal-setting,
+  which is the same shape of gap as the loop harness's scripted worker.
+- **An unsatisfiable goal is bounded but never diagnosed.** A goal whose criteria
+  reference something that cannot exist will burn its full leash — the round ceiling
+  caps that at `3 ×` the tier, and the plateau breaker ends it early when the
+  failure text repeats. Neither one *notices* that the bar is impossible, and a
+  model that rephrases its complaint each round defeats the comparison. This is the
+  failure Claude Code's own `/goal` is on record looping ~30 times on; Bandaid stops
+  sooner and explains no better.
 - **The plateau breaker fires, and until recently it fired far too eagerly.** This
   entry used to say it "almost never fires" — replayed against two real stuck loops
   it would have fired zero times, because a judge writes fresh prose each round and
@@ -1006,11 +1090,12 @@ the first compaction after install replays prompts from before Bandaid existed.
 ## Development
 
 ```bash
-npm test          # 364 tests, no dependencies, no network
+npm test          # 520 tests, no dependencies, no network
 npm run eval      # measures the judge against fixtures; needs `claude` on PATH
 npm run eta       # backtests the ETA against recorded sessions; skips if none
 npm run autonomy  # scores the permission-ask classifier against its corpus
-npm run loop      # runs the Stop loop against 7 fixtures; offline, ~17s
+npm run loop      # runs the Stop loop against 8 fixtures; offline, ~20s
+npm run criteria  # scores independent vs worker-written criteria; needs `claude`
 node bin/bandaid.js doctor
 ```
 
@@ -1112,9 +1197,10 @@ labelled as one instead of assumed to be fine.
 The harness that runs the loop rather than the grader now exists:
 
 ```bash
-npm run loop                              # 7 fixtures, offline, ~17s
+npm run loop                              # 8 fixtures, offline, ~20s
 npm run loop -- --ablate completion-audit
 npm run loop -- --ablate ledger --judge
+npm run loop -- --ablate seal
 ```
 
 It runs several `Stop` rounds against a fixture repository that **changes between
@@ -1137,6 +1223,21 @@ the only possible outcome, not a finding. The 277-word completion audit is there
 (`--worker claude`, a model-in-the-loop tier, deliberately unbuilt) instead of a flag
 that exists and cannot answer.
 
+**The seal's ablation is the one that came back non-null.** Every other mechanism
+measured by this harness either could not be measured by it (prose) or moved no
+number (the ledger). The `sealed` fixture reproduces SpecBench's feature-isolation
+shape — a `query()` whose `filter` and `groupBy` each pass alone and do not compose,
+with a visible check that tests each in isolation and goes green on round 1:
+
+```
+npm run loop                    8/8   sealed → blocked at round 2, ended by seal
+npm run loop -- --ablate seal   7/8   sealed → complete at round 1, ended by check
+```
+
+Withheld, the tier lets a goal close as done on an implementation that does not do
+what the objective asked. That is what earning a place looks like on this harness,
+and it is worth stating plainly next to the two that did not.
+
 **The evidence ledger's excuse is spent, and its answer is unchanged.** The fixture
 `karpathy-report.md` asked for — two sequential judgements over a repository that
 changes between them — now exists: round 1 lands a correct implementation, round 2
@@ -1152,7 +1253,18 @@ That is ten fixtures on one theme with Haiku and criteria supplied — a floor,
 not a general claim about the judge. What it buys is a regression detector: the
 number moves when a prompt or a tier changes, which nothing here could tell you
 before. `constraint-violated` is the one that is genuinely flaky (6 of 8 across
-runs); the others have not missed.
+runs).
+
+**"The others have not missed" is no longer true, and the correction is worth more
+than the sentence it replaces.** During the seal work a single run came back
+**9/10 with recall 50%** — a `complete`-expected fixture judged `continue`. The next
+run was 10/10 and `--repeat 3` was **30/30**, so it is one miss in ~41 judgements
+rather than a regression: the judge prompt is byte-identical (no `judge-*` golden
+moved) and the only judge-path change filters `seal` records out of the rendered
+ledger, which is provably a no-op on a ledger that has none. The lesson is about the
+harness, not the change — **a single 10/10 is a weak signal from a stochastic
+grader**, and a one-shot run should not be quoted as a gate without saying how many
+samples produced it.
 
 The last two fixtures exist because the mechanisms they cover are prompt-shaped,
 and a test that only asserts the prompt contains the right paragraph proves the

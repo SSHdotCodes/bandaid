@@ -120,6 +120,11 @@ function writeHandoff(cwd, sessionId, goal) {
       // walls that are still standing.
       blockedStreak: goal.blockedStreak || 0,
       check: goal.check ?? null,
+      // The held-out command travels with the objective so tomorrow's session
+      // inherits the same bar. Its *findings* never enter this record: those stay
+      // in the session goal and the ledger, because a handoff is read aloud to a
+      // new session by openObjectivePrompt.
+      seal: goal.seal ?? null,
       baseSha: goal.baseSha ?? null,
       status: goal.status,
       source: goal.source,

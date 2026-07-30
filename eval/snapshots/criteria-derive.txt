@@ -1,0 +1,13 @@
+You are writing the acceptance criteria for an objective somebody else is about to implement. You will not do the work and you will not be graded on it.
+
+<objective>
+Port the retry logic to the new client
+</objective>
+
+Read the repository to ground the criteria in what is actually there — real paths, real symbols, real commands. Do not propose criteria for work the objective does not ask for.
+
+Write 2 to 5 criteria. Each one states a condition that will be observably true when the objective is met: a command that exits 0, a file that exists and contains something specific, a behaviour that can be checked by looking. Together they must cover the objective as written — including any part of it that is awkward, slow, or hard to test.
+
+The failure to avoid is a list that is individually reasonable and collectively smaller than the objective. Whoever implements this will treat your list as the whole bar, so anything you leave out is work that will not happen.
+
+Reply with the criteria as a numbered list and nothing else. No preamble, no commentary.

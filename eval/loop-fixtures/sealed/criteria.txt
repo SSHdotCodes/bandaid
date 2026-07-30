@@ -1,0 +1,3 @@
+query() filters rows by a predicate
+query() groups rows by a key
+filtering and grouping compose in one call
