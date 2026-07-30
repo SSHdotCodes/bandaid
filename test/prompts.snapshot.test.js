@@ -58,7 +58,25 @@ const base = {
   baseSha: null,
   projectRoot: null,
   continuations: 1,
+  // newGoal stamps startedAt from the clock, and the elapsed block renders from
+  // it. Pinning it to null is what keeps these goldens byte-stable — a clause
+  // with no input is absent, so the whole block disappears here and appears only
+  // in the two goldens below that supply a fixed clock on purpose.
+  startedAt: null,
+  createdAt: null,
+  lastProgressAt: null,
+  continuationAt: [],
 };
+
+// A goal with a clock, for the goldens that exercise the elapsed block. `now` and
+// the UTC offset are both explicit so this renders identically on every machine.
+const CLOCK_NOW = Date.parse('2026-07-30T16:42:00.000Z');
+const withClock = {
+  ...base,
+  startedAt: '2026-07-30T13:24:00.000Z',
+  lastProgressAt: '2026-07-30T16:31:00.000Z',
+};
+const clockOpts = { ...({}), now: CLOCK_NOW, offsetMinutes: 0 };
 const withCriteria = {
   ...base,
   criteria: ['npm test exits 0', 'src/client.js no longer references retryLegacy', 'the backoff delays actually grow'],
@@ -114,6 +132,31 @@ describe('prompt snapshots', () => {
 
   it('continuation — criteria fixed', () => {
     matchesSnapshot('continuation-criteria', continuationPrompt(withCriteria, opts));
+  });
+
+  // The elapsed block, which the goldens above must not contain: with no
+  // startedAt every clause has no input, so the whole block disappears. These two
+  // supply a fixed clock and a fixed UTC offset on purpose.
+  it('continuation — elapsed, with no wall-clock budget', () => {
+    matchesSnapshot('continuation-elapsed', continuationPrompt(withClock, { ...opts, ...clockOpts }));
+  });
+
+  it('continuation — elapsed against a wall-clock budget', () => {
+    matchesSnapshot(
+      'continuation-elapsed-budgeted',
+      continuationPrompt({ ...withClock, timeBudgetMs: 6 * 60 * 60 * 1000 }, { ...opts, ...clockOpts }),
+    );
+  });
+
+  it('continuation — the turn ended asking permission', () => {
+    matchesSnapshot(
+      'continuation-asked-permission',
+      continuationPrompt(base, {
+        ...opts,
+        askedPermission: true,
+        blockCommand: 'node /bandaid.js goal block --session S "what is blocked"',
+      }),
+    );
   });
 
   it('continuation — a check command failed', () => {
@@ -274,28 +317,40 @@ describe('prompt snapshots', () => {
  *
  * These are not targets. Every one of them should be going down.
  */
+// Retightened once the capacity line landed. Collapsing the four-line Budget block
+// and the three-line Elapsed block into one line took **15 words off every one of
+// the ten continuation goldens — 150 words** — while adding a wall-clock budget and
+// an ETA, so every ceiling here came down rather than up. Each now sits 5 words
+// above its golden, which is the smallest headroom that does not make an
+// inconsequential rewording fail the suite.
 const CEILINGS = {
-  'budget-limit': 130,
-  compaction: 260,
-  'continuation-bare': 800,
-  'continuation-blocked': 960,
-  'continuation-check-configured': 850,
-  'continuation-check-failed': 910,
-  'continuation-criteria': 810,
-  'continuation-evidence': 890,
-  'continuation-expect-failed': 880,
-  'continuation-judge-finding': 870,
-  'continuation-probe-failed': 870,
-  'continuation-scope-failed': 860,
-  'judge-bare': 195,
-  'judge-constraints': 420,
-  'judge-criteria': 245,
-  'judge-ledger': 375,
-  'open-objective-adopted': 215,
-  'open-objective-offer': 265,
-  'probe-pending': 95,
-  'restore-block': 300,
-  violation: 200,
+  'budget-limit': 125,
+  compaction: 257,
+  // The autonomy paragraph is 57 words and appears only on the turn that asked
+  // permission, so it costs nothing on any other path. This golden also carries the
+  // block-command section, which is why it is not simply bare + 57.
+  'continuation-asked-permission': 908,
+  'continuation-bare': 783,
+  'continuation-blocked': 936,
+  'continuation-check-configured': 828,
+  'continuation-check-failed': 893,
+  'continuation-criteria': 788,
+  'continuation-elapsed': 800,
+  'continuation-elapsed-budgeted': 807,
+  'continuation-evidence': 867,
+  'continuation-expect-failed': 859,
+  'continuation-judge-finding': 852,
+  'continuation-probe-failed': 851,
+  'continuation-scope-failed': 841,
+  'judge-bare': 190,
+  'judge-constraints': 412,
+  'judge-criteria': 238,
+  'judge-ledger': 369,
+  'open-objective-adopted': 207,
+  'open-objective-offer': 257,
+  'probe-pending': 91,
+  'restore-block': 297,
+  violation: 196,
 };
 
 describe('the prompt surface does not quietly grow', () => {

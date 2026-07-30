@@ -18,7 +18,7 @@ const ledger = require('../lib/ledger');
 const project = require('../lib/project');
 const store = require('../lib/store');
 const { buildRestoreBlock } = require('../lib/restore');
-const { blockersSection, constraintsSection, openObjectivePrompt } = require('../lib/prompts');
+const { blockersSection, constraintsSection, openObjectivePrompt, sessionClockLine } = require('../lib/prompts');
 const { emit, runHook } = require('../lib/hookio');
 
 /**
@@ -58,7 +58,26 @@ function sweepIfDue(config) {
  * is the worse error, and a model told the facts will decide better than a
  * policy can.
  */
-function carryOver(config, sessionId, cwd) {
+/**
+ * The clock, as a prefix for whatever this hook was already going to say.
+ *
+ * Deliberately *not* an emit of its own. A startup session with no objective to
+ * offer and no compaction to restore injects nothing at all — three end-to-end
+ * tests assert exactly that, and they are defending the property the whole
+ * design rests on: no tokens until something needs them. So the time rides along
+ * with a block that was already being paid for, and a session with nothing to say
+ * still says nothing.
+ */
+function clockPrefix(config, sessionId) {
+  const line = sessionClockLine({
+    sessionStartedAt: store.sessionStartedAt(sessionId),
+    goal: goals.loadGoal(sessionId),
+    timeBudgetMs: (config.goals || {}).timeBudgetMs ?? null,
+  });
+  return line ? `[Bandaid] ${line}\n\n` : '';
+}
+
+function carryOver(config, sessionId, cwd, clock = '') {
   const settings = config.goals || {};
   if (!config.enabled || settings.enabled === false || settings.mode === 'off') return false;
 
@@ -73,17 +92,18 @@ function carryOver(config, sessionId, cwd) {
   if (mode === 'auto') {
     const adopted = goals.adoptHandoff(sessionId, cwd, config);
     if (!adopted) return false;
-    emit(openObjectivePrompt(record, { adopted: true, ageDays }));
+    emit(clock + openObjectivePrompt(record, { adopted: true, ageDays }));
     return true;
   }
 
   emit(
-    openObjectivePrompt(record, {
-      adopted: false,
-      adoptCommand: goals.adoptCommand(sessionId),
-      clearCommand: goals.clearProjectCommand(),
-      ageDays,
-    }),
+    clock +
+      openObjectivePrompt(record, {
+        adopted: false,
+        adoptCommand: goals.adoptCommand(sessionId),
+        clearCommand: goals.clearProjectCommand(),
+        ageDays,
+      }),
   );
   return true;
 }
@@ -123,6 +143,8 @@ runHook('SessionStart', ({ input, config }) => {
     ledger.backfillFromTranscript(sessionId, input.transcript_path);
   }
 
+  const clock = clockPrefix(config, sessionId);
+
   if (source !== 'compact') {
     const goal = goals.loadGoal(sessionId);
 
@@ -130,10 +152,11 @@ runHook('SessionStart', ({ input, config }) => {
     // that was never closed. Offer it, or take it up, depending on policy —
     // never silently, because a session that starts working yesterday's task
     // because it saw the words is worse than one that never heard of it.
-    if (!goal && carryOver(config, sessionId, cwd)) return 0;
+    if (!goal && carryOver(config, sessionId, cwd, clock)) return 0;
 
     if ((source === 'resume' || source === 'fork') && goal && goal.status === 'active') {
       emit(
+        clock +
         [
           '<bandaid-active-goal>',
           'This objective was still open when the session was last active:',
@@ -168,6 +191,6 @@ runHook('SessionStart', ({ input, config }) => {
   if (!restored) return 0;
 
   store.updateMeta(sessionId, { pendingRestore: false, lastRestoreStats: restored.stats });
-  emit(restored.text);
+  emit(clock + restored.text);
   return 0;
 });
