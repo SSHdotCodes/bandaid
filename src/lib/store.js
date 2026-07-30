@@ -260,6 +260,34 @@ function updateMeta(sessionId, patch) {
   return next;
 }
 
+/**
+ * The most recent turn record's timestamp, or null.
+ *
+ * Read backwards and stopped at one record: this runs after every tool batch, and
+ * a multi-day session's turns.jsonl is megabytes.
+ */
+function lastTurnTs(sessionId) {
+  const records = readJsonlBackwards(turnsFile(sessionId), (found) => found.length >= 1);
+  if (!records.length) return null;
+  return records[records.length - 1].ts || null;
+}
+
+/**
+ * When this session first did anything.
+ *
+ * Recorded in meta on the first prompt, because that is the only moment a hook
+ * can be sure it is the first. Falls back to the oldest prompt for a session
+ * that predates the field or whose meta was lost, and returns null rather than
+ * `now` when there is nothing to go on — an unknown session age must render as
+ * absent, not as zero.
+ */
+function sessionStartedAt(sessionId) {
+  const meta = readMeta(sessionId);
+  if (meta.startedAt) return meta.startedAt;
+  const prompts = readPrompts(sessionId);
+  return prompts.length ? prompts[0].ts || null : null;
+}
+
 // --- global state --------------------------------------------------------
 
 function stateFile() {
@@ -464,7 +492,9 @@ module.exports = {
   readTurnsSince,
   recordPrompt,
   recordTurn,
+  lastTurnTs,
   sanitizeId,
+  sessionStartedAt,
   sessionDir,
   sessionsDir,
   sessionsForCwd,

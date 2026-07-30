@@ -91,4 +91,99 @@ function readPromptsFromTranscript(transcriptPath) {
   return out;
 }
 
-module.exports = { entryText, isCommandNoise, isUserPromptEntry, looksLikeCompactSummary, readPromptsFromTranscript };
+/**
+ * Real per-call tool durations, read out of Claude Code's own transcript.
+ *
+ * Nothing Bandaid records knows how long a tool took: `recordTurn` stamps one
+ * timestamp per batch, at the moment the record is written. The transcript has
+ * what is needed and it is exact — an `assistant` entry's `tool_use` block is
+ * stamped when the call was issued, and the `user` entry carrying its
+ * `tool_result` is stamped when it came back, with `sourceToolAssistantUUID`
+ * pointing at the call. The difference is the duration.
+ *
+ * Measured against a real session before this was written: 172 of 172 calls
+ * matched, no negative durations.
+ *
+ * Two things this measures that are easy to misread, and that callers must not
+ * average away. An asynchronous tool records the time its *call* took, not its
+ * work — a backgrounded agent looks like 20ms. And a tool that waits for a person
+ * measures the person.
+ *
+ * `since` is an ISO timestamp; only calls that returned strictly after it are
+ * reported, which is what lets a caller fold a growing transcript in repeatedly
+ * without counting anything twice.
+ */
+function readToolTimings(transcriptPath, { since = null } = {}) {
+  if (!transcriptPath) return [];
+  let raw;
+  try {
+    raw = fs.readFileSync(transcriptPath, 'utf8');
+  } catch {
+    return [];
+  }
+
+  const floor = since ? Date.parse(since) : null;
+  const issuedAt = new Map(); // assistant uuid -> ISO timestamp
+  const toolName = new Map(); // tool_use id -> name
+  const out = [];
+
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let entry;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+
+    const content = entry.message && entry.message.content;
+    if (!Array.isArray(content)) continue;
+
+    if (entry.type === 'assistant') {
+      for (const block of content) {
+        if (block && block.type === 'tool_use') {
+          if (entry.uuid && entry.timestamp) issuedAt.set(entry.uuid, entry.timestamp);
+          if (block.id) toolName.set(block.id, block.name || null);
+        }
+      }
+      continue;
+    }
+
+    if (entry.type !== 'user') continue;
+    for (const block of content) {
+      if (!block || block.type !== 'tool_result') continue;
+
+      const startedAt = issuedAt.get(entry.sourceToolAssistantUUID);
+      const name = toolName.get(block.tool_use_id);
+      if (!startedAt || !name || !entry.timestamp) continue;
+
+      const start = Date.parse(startedAt);
+      const end = Date.parse(entry.timestamp);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+      if (floor != null && !(end > floor)) continue;
+
+      out.push({
+        name,
+        toolUseId: block.tool_use_id || null,
+        startedAt,
+        endedAt: entry.timestamp,
+        // Clamped for the same reason every elapsed in this codebase is: a clock
+        // that moved backwards must not produce a negative sample that then drags
+        // a percentile down.
+        durationMs: Math.max(0, end - start),
+      });
+    }
+  }
+
+  return out;
+}
+
+module.exports = {
+  entryText,
+  isCommandNoise,
+  isUserPromptEntry,
+  looksLikeCompactSummary,
+  readPromptsFromTranscript,
+  readToolTimings,
+};

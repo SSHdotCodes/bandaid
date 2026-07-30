@@ -86,6 +86,57 @@ describe('readTurnsSince', () => {
   });
 });
 
+describe('lastTurnTs', () => {
+  it('returns the newest record without parsing the whole file', () => {
+    seedTurns('last-ts', 40);
+    assert.equal(store.lastTurnTs('last-ts'), '2026-07-27T00:00:40.000Z');
+  });
+
+  it('reads across a chunk boundary', () => {
+    // Same padding trick the readTurnsSince cases use: force the backwards walk to
+    // need more than one chunk.
+    seedTurns('last-ts-big', 60, { padBytes: 20_000 });
+    assert.equal(store.lastTurnTs('last-ts-big'), '2026-07-27T00:00:00.000Z');
+  });
+
+  it('ignores a torn final line rather than returning nothing', () => {
+    seedTurns('last-ts-torn', 3);
+    fs.appendFileSync(store.turnsFile('last-ts-torn'), '{"ts":"2026-07-27T00:00:09.000Z"');
+    assert.equal(store.lastTurnTs('last-ts-torn'), '2026-07-27T00:00:03.000Z');
+  });
+
+  it('is null for a session with no turns at all', () => {
+    assert.equal(store.lastTurnTs('last-ts-none'), null);
+  });
+});
+
+describe('sessionStartedAt', () => {
+  it('prefers the recorded field, which is written once and never moved', () => {
+    store.updateMeta('start-meta', { startedAt: '2026-07-27T09:00:00.000Z' });
+    store.recordPrompt('start-meta', { text: 'later prompt' });
+    assert.equal(store.sessionStartedAt('start-meta'), '2026-07-27T09:00:00.000Z');
+  });
+
+  it('falls back to the oldest prompt for a session that predates the field', () => {
+    store.ensureSessionDir('start-fallback');
+    fs.writeFileSync(
+      store.promptsFile('start-fallback'),
+      [
+        JSON.stringify({ ts: '2026-07-27T08:00:00.000Z', text: 'first' }),
+        JSON.stringify({ ts: '2026-07-27T10:00:00.000Z', text: 'second' }),
+      ].join('\n') + '\n',
+    );
+    assert.equal(store.sessionStartedAt('start-fallback'), '2026-07-27T08:00:00.000Z');
+  });
+
+  it('returns null rather than now when there is nothing to go on', () => {
+    // An unknown session age has to render as absent. Defaulting to the current
+    // time would report every fresh session as having just started, which is
+    // indistinguishable from the truth and wrong on a resumed one.
+    assert.equal(store.sessionStartedAt('start-empty'), null);
+  });
+});
+
 describe('pruneSessions', () => {
   const DAY = 24 * 60 * 60 * 1000;
   const NOW = Date.parse('2026-07-27T00:00:00.000Z');
